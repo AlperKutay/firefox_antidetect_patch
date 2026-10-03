@@ -534,7 +534,13 @@ export class PageHandler {
 
   async ['Page.goBack']({}) {
     const browsingContext = this._pageTarget.linkedBrowser().browsingContext;
-    if (!browsingContext.embedderElement?.canGoBack)
+    // goBack() below traverses to index - 1 like history.back(), so the guard
+    // must ask the same question. canGoBack is the back BUTTON's rule: with
+    // browser.navigation.requireUserInteraction it skips entries nobody
+    // interacted with, and refused a go_back over an entry the page left by
+    // script (or one whose interaction mark was lost under load). Marionette's
+    // WebDriver Back uses the same getter.
+    if (!browsingContext.embedderElement?.canGoBackIgnoringUserInteraction)
       return { success: false };
     browsingContext.goBack();
     return { success: true };
