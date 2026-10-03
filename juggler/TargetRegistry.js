@@ -198,8 +198,20 @@ export class TargetRegistry {
     this._userContextIdToBrowserContext = new Map();
     this._browserToTarget = new Map();
     this._browserIdToTarget = new Map();
-    this._bcIdToTarget = new Map();
-    this._pendingActors = new Map(); // browserId/bcId → actor (for actors that arrive before PageTarget)
+    // The Juggler actor of the current top-level document of each <browser>,
+    // keyed by browserId, whether or not its PageTarget exists yet: the actor
+    // of a new tab's about:blank usually arrives BEFORE the TabOpen that
+    // creates the target, and the target picks it up from here.
+    //
+    // ⛔ browserId IS THE ONLY KEY. It is shared by every document of one
+    // <browser> and survives the BrowsingContext replacement of a navigation
+    // out of a bfcache-eligible page. A BrowsingContext id is a different
+    // counter: an earlier version also matched actors on it, set the target's
+    // entry under the FIRST context id and deleted it under the CURRENT one,
+    // so every page that navigated twice left a stale entry behind, and the
+    // first new tab whose browserId equalled that number lost its actor.
+    // Browser.newPage then never answered (the fifth page, measured).
+    this._browserIdToActor = new Map();
 
     this._proxiesWithClashingAuthCacheKeys = new Set();
     this._browserProxy = null;
@@ -247,17 +259,6 @@ export class TargetRegistry {
       if (!browserContext)
         throw new Error(`Internal error: cannot find context for userContextId=${userContextId}`);
       const target = new PageTarget(this, window, tab, browserContext, openerTarget);
-      // Wire up any actor that arrived before this PageTarget was created.
-      // Check both browserId (parent-process actor) and bcId (Fission content-process actor,
-      // whose browserId equals the outer BC's id).
-      const bc = tab.linkedBrowser?.browsingContext;
-      const pendingActor = bc && (this._pendingActors.get(bc.browserId) || this._pendingActors.get(bc.id));
-      if (pendingActor) {
-        pendingActor.wireToTarget(target);
-        this._pendingActors.delete(bc.browserId);
-        this._pendingActors.delete(bc.id);
-      } else {
-      }
       target.updateOverridesForBrowsingContext(tab.linkedBrowser.browsingContext);
       if (!hasExplicitSize)
         target.updateViewportSize();
@@ -505,6 +506,20 @@ export class TargetRegistry {
     return this._browserIdToTarget.get(browserId);
   }
 
+  // Called by JugglerFrameParent for the actor of a CURRENT top-level document
+  // only: when it is created, and when a document restored from the bfcache
+  // becomes current again.
+  onActorCreated(actor, browserId) {
+    this._browserIdToActor.set(browserId, actor);
+    this._browserIdToTarget.get(browserId)?.setActor(actor);
+  }
+
+  onActorDestroyed(actor, browserId) {
+    this._browserIdToTarget.get(browserId)?.removeActor(actor);
+    if (this._browserIdToActor.get(browserId) === actor)
+      this._browserIdToActor.delete(browserId);
+  }
+
   targetForId(targetId) {
     for (const target of this._browserToTarget.values()) {
       if (target.id() === targetId)
@@ -524,6 +539,9 @@ export class PageTarget {
     this._gBrowser = win.gBrowser;
     this._tab = tab;
     this._linkedBrowser = tab.linkedBrowser;
+    // Kept, not re-read at dispose: the registry entry must be deleted under
+    // the same key it was set under.
+    this._browserId = this._linkedBrowser.browsingContext.browserId;
     this._browserContext = browserContext;
     this._viewportSize = undefined;
     // { screencastId } while a screencast is running on this page, undefined
@@ -563,8 +581,10 @@ export class PageTarget {
     this._disposed = false;
     browserContext.pages.add(this);
     this._registry._browserToTarget.set(this._linkedBrowser, this);
-    this._registry._browserIdToTarget.set(this._linkedBrowser.browsingContext.browserId, this);
-    this._registry._bcIdToTarget.set(this._linkedBrowser.browsingContext.id, this);
+    this._registry._browserIdToTarget.set(this._browserId, this);
+    const actor = this._registry._browserIdToActor.get(this._browserId);
+    if (actor)
+      this.setActor(actor);
 
     this._registry.emit(TargetRegistry.Events.TargetCreated, this);
   }
@@ -603,6 +623,7 @@ export class PageTarget {
 
   setActor(actor) {
     this._actor = actor;
+    actor.actorName = `browser::page[${this._targetId}]/${actor.browsingContext.browserId}/${actor.browsingContext.id}/${this.nextActorSequenceNumber()}`;
     this._channel.bindToActor(actor);
   }
 
@@ -964,8 +985,7 @@ export class PageTarget {
     }
     this._browserContext.pages.delete(this);
     this._registry._browserToTarget.delete(this._linkedBrowser);
-    this._registry._browserIdToTarget.delete(this._linkedBrowser.browsingContext.browserId);
-    this._registry._bcIdToTarget.delete(this._linkedBrowser.browsingContext.id);
+    this._registry._browserIdToTarget.delete(this._browserId);
     try {
       helper.removeListeners(this._eventListeners);
     } catch (e) {
