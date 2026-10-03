@@ -253,6 +253,11 @@ class NetworkRequest {
       this.httpChannel.requestMethod = method;
     if (postData !== undefined)
       setPostData(this.httpChannel, postData, headers);
+    // Last, after everything above has set what it sets: this channel is a
+    // replacement built by two internal redirects, and its headers are in the
+    // order Gecko rebuilt them, not the order the request had.
+    if (this._wireHeaderOrder)
+      restoreRequestHeaderOrder(this.httpChannel, this._wireHeaderOrder);
   }
 
   // nsIInterfaceRequestor
@@ -342,6 +347,17 @@ class NetworkRequest {
       return false;
     }
 
+    // ⛔ THE ORDER THE REQUEST WOULD HAVE GONE OUT IN, taken here because this
+    // is the last moment it exists. Interception swaps this channel for an
+    // InterceptedHttpChannel and resuming swaps that for a new nsHttpChannel;
+    // each swap re-creates the standard headers first, copies the rest after
+    // them minus Connection, Cookie and Content-Length, and adds those back
+    // later at the end. Measured on HTTP/1.1 with route.continue_(): Connection
+    // and Cookie after the Sec-Fetch-* group, and on a POST Referer after
+    // Content-Length - an order this browser never sends without a route.
+    // Only for our own interception: a service worker that lets a request
+    // through resets it the same way in a stock Firefox, so that order is real.
+    this._wireHeaderOrder = requestHeaders(channel);
     return true;
   }
 
@@ -739,9 +755,47 @@ function clearRequestHeaders(httpChannel) {
   }
 }
 
+// A route's headers REPLACE the request's, verbatim: they are the caller's
+// explicit values, usually the ones it just read from the request, and
+// rewriting one (as the extra-headers path does with Accept-Language) would
+// make the same request differ with and without a route. Positions are kept:
+// the headers the request already had stay where they were, with the
+// request's own spelling of the name, and only new ones go at the end.
 function overrideRequestHeaders(httpChannel, headers) {
+  const order = requestHeaders(httpChannel);
   clearRequestHeaders(httpChannel);
-  appendExtraHTTPHeaders(httpChannel, headers);
+  setRequestHeaders(httpChannel, headers);
+  restoreRequestHeaderOrder(httpChannel, order);
+}
+
+function setRequestHeaders(httpChannel, headers) {
+  for (const header of headers)
+    httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
+}
+
+// Puts the channel's headers in `order`: a list of headers as a request
+// carried them, of which only the names, their spelling and their sequence are
+// used. The values stay the channel's own. A header `order` does not name keeps
+// its place relative to the others after them; Host cannot be removed and
+// stays where Gecko put it, first.
+function restoreRequestHeaderOrder(httpChannel, order) {
+  const current = requestHeaders(httpChannel).filter(header => header.name.toLowerCase() !== 'host');
+  const unplaced = new Map(current.map(header => [header.name.toLowerCase(), header]));
+  const sequence = [];
+  for (const { name } of order) {
+    const header = unplaced.get(name.toLowerCase());
+    if (!header)
+      continue;
+    sequence.push({ name, value: header.value });
+    unplaced.delete(name.toLowerCase());
+  }
+  for (const header of current) {
+    if (unplaced.get(header.name.toLowerCase()) === header)
+      sequence.push(header);
+  }
+  for (const header of current)
+    httpChannel.setRequestHeader(header.name, '', false /* merge */);
+  setRequestHeaders(httpChannel, sequence);
 }
 
 const redirectStatus = [301, 302, 303, 307, 308];
