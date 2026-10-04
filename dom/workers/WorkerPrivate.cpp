@@ -67,6 +67,7 @@
 #include "mozilla/dom/MessageEventBinding.h"
 #include "mozilla/dom/MessagePort.h"
 #include "mozilla/dom/MessagePortBinding.h"
+#include "mozilla/dom/Navigator.h"
 #include "mozilla/dom/PRemoteWorkerDebuggerParent.h"
 #include "mozilla/dom/Performance.h"
 #include "mozilla/dom/PerformanceStorageWorker.h"
@@ -2847,8 +2848,22 @@ WorkerPrivate::WorkerPrivate(
     }
 
     mIsPrivilegedAddonGlobal = aParent->mIsPrivilegedAddonGlobal;
+
+    // STEALTHFOX: a nested worker belongs to the same document as its parent.
+    // The realm locale came with CopyJSSettings above; the language list is
+    // already parsed, and parsing needs the main thread.
+    mLanguageOverrideList = aParent->mLanguageOverrideList.Clone();
   } else {
     AssertIsOnMainThread();
+
+    // STEALTHFOX: navigator.languages of this worker, from the same
+    // LanguageOverride its owner's window reads (Navigator::GetLanguages). An
+    // empty list means "no override": WorkerNavigator then keeps the
+    // process-wide list from intl.accept_languages, as upstream does.
+    if (!mLoadInfo.mLanguageOverride.IsEmpty()) {
+      Navigator::GetAcceptLanguages(mLanguageOverrideList,
+                                    &mLoadInfo.mLanguageOverride);
+    }
 
     RuntimeService::GetDefaultJSSettings(mJSSettings);
 
@@ -2908,8 +2923,24 @@ WorkerPrivate::WorkerPrivate(
       // Il conto per esteso in `71-bug-archive.md` [B165].
       //
       // Siamo su AssertIsOnMainThread(), quindi Preferences si puo' leggere.
-      nsAutoCString stealthLocale;
-      Preferences::GetCString("juggler.locale.override", stealthLocale);
+      //
+      // STEALTHFOX (prfix/worker-locale): the pref above is the SESSION's
+      // language, valid for the whole process, and since a context can carry
+      // its own language (Browser.setLocaleOverride writes the top
+      // BrowsingContext's LanguageOverride) it was the wrong source for a
+      // worker whose document speaks another one: a Worker created by a de-DE
+      // page in an it-IT session answered it-IT in Intl and in
+      // navigator.languages while its window answered de-DE. The owner's
+      // field comes first, through mLoadInfo.mLanguageOverride (see
+      // WorkerLoadInfoData). The pref is read only when no owner is known (a
+      // service worker spawned while no page of its context is open, a chrome
+      // worker): it is the same declaration BrowsingContext::Attach seeds
+      // every top-level context with, so it is not a second source, and
+      // leaving the argument empty would bring back [B165].
+      nsAutoCString stealthLocale(mLoadInfo.mLanguageOverride);
+      if (stealthLocale.IsEmpty()) {
+        Preferences::GetCString("juggler.locale.override", stealthLocale);
+      }
 
       xpc::InitGlobalObjectOptions(
           chromeRealmOptions, UsesSystemPrincipal(), mIsSecureContext,
@@ -3397,6 +3428,7 @@ nsresult WorkerPrivate::GetLoadInfo(
     loadInfo.mParentController = aParent->GlobalScope()->GetController();
     loadInfo.mWatchedByDevTools = aParent->IsWatchedByDevTools();
     loadInfo.mIsOn3PCBExceptionList = aParent->IsOn3PCBExceptionList();
+    loadInfo.mLanguageOverride = aParent->mLoadInfo.mLanguageOverride;
   } else {
     AssertIsOnMainThread();
 
@@ -3547,6 +3579,10 @@ nsresult WorkerPrivate::GetLoadInfo(
       loadInfo.mOverriddenFingerprintingSettings =
           document->GetOverriddenFingerprintingSettings();
       loadInfo.mIsOn3PCBExceptionList = document->IsOn3PCBExceptionList();
+      // STEALTHFOX: the same field Navigator::GetLanguages and the window's
+      // realm (nsGlobalWindowOuter) read. See WorkerLoadInfoData.
+      loadInfo.mLanguageOverride =
+          globalWindow->GetBrowsingContext()->Top()->GetLanguageOverride();
 
       // This is an hack to deny the storage-access-permission for workers of
       // sub-iframes.
@@ -6107,6 +6143,13 @@ void WorkerPrivate::UpdateContextOptionsInternal(
 
 void WorkerPrivate::UpdateLanguagesInternal(
     const nsTArray<nsString>& aLanguages) {
+  // STEALTHFOX: this is the intl.accept_languages broadcast. A worker that
+  // follows its owner's LanguageOverride ignores it, exactly as the owner's
+  // Navigator::GetLanguages does; its nested workers carry the same list.
+  if (!mLanguageOverrideList.IsEmpty()) {
+    return;
+  }
+
   WorkerGlobalScope* globalScope = GlobalScope();
   RefPtr<WorkerNavigator> nav = globalScope->GetExistingNavigator();
   if (nav) {

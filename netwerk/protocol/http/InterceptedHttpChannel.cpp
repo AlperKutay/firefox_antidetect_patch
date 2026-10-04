@@ -730,8 +730,15 @@ NS_IMETHODIMP
 InterceptedHttpChannel::ResetInterceptionWithURI(nsIURI* aURI) {
   if (aURI) {
     mURI = aURI;
+    // A controller chosen for the original URL does not follow the request
+    // somewhere else.
+    return ResetInterception(true);
   }
-  return ResetInterception(true);
+  // Unchanged: do what the service worker that let it through asked for.
+  // Forcing true here cleared the controller of every navigation a worker
+  // did not answer, so with Juggler attached no page was ever controlled by
+  // its service worker, route or not.
+  return ResetInterception(mServiceWorkerResetBypass);
 }
 
 NS_IMETHODIMP
@@ -740,6 +747,7 @@ InterceptedHttpChannel::ResetInterception(bool aBypass) {
                    this, aBypass ? "true" : "false"));
   if (mInterceptAfterServiceWorkerResets) {
     mInterceptAfterServiceWorkerResets = false;
+    mServiceWorkerResetBypass = aBypass;
     nsCOMPtr<nsINetworkInterceptController> controller;
     GetCallback(controller);
     if (!controller)

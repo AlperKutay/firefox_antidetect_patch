@@ -198,8 +198,20 @@ export class TargetRegistry {
     this._userContextIdToBrowserContext = new Map();
     this._browserToTarget = new Map();
     this._browserIdToTarget = new Map();
-    this._bcIdToTarget = new Map();
-    this._pendingActors = new Map(); // browserId/bcId → actor (for actors that arrive before PageTarget)
+    // The Juggler actor of the current top-level document of each <browser>,
+    // keyed by browserId, whether or not its PageTarget exists yet: the actor
+    // of a new tab's about:blank usually arrives BEFORE the TabOpen that
+    // creates the target, and the target picks it up from here.
+    //
+    // ⛔ browserId IS THE ONLY KEY. It is shared by every document of one
+    // <browser> and survives the BrowsingContext replacement of a navigation
+    // out of a bfcache-eligible page. A BrowsingContext id is a different
+    // counter: an earlier version also matched actors on it, set the target's
+    // entry under the FIRST context id and deleted it under the CURRENT one,
+    // so every page that navigated twice left a stale entry behind, and the
+    // first new tab whose browserId equalled that number lost its actor.
+    // Browser.newPage then never answered (the fifth page, measured).
+    this._browserIdToActor = new Map();
 
     this._proxiesWithClashingAuthCacheKeys = new Set();
     this._browserProxy = null;
@@ -233,6 +245,10 @@ export class TargetRegistry {
       const tab = event.target;
       const userContextId = tab.userContextId;
       const browserContext = this._userContextIdToBrowserContext.get(userContextId);
+      // Set by nsWindowWatcher::CalculateChromeFlagsForContent when the
+      // window.open features give a size. Such a popup keeps the size the page
+      // asked for, as in every Firefox; the context's default viewport is for
+      // tabs and for popups that did not name one.
       const hasExplicitSize = appWindow && (appWindow.chromeFlags & Ci.nsIWebBrowserChrome.JUGGLER_WINDOW_EXPLICIT_SIZE) !== 0;
       const openerContext = tab.linkedBrowser.browsingContext.opener;
       let openerTarget;
@@ -247,17 +263,6 @@ export class TargetRegistry {
       if (!browserContext)
         throw new Error(`Internal error: cannot find context for userContextId=${userContextId}`);
       const target = new PageTarget(this, window, tab, browserContext, openerTarget);
-      // Wire up any actor that arrived before this PageTarget was created.
-      // Check both browserId (parent-process actor) and bcId (Fission content-process actor,
-      // whose browserId equals the outer BC's id).
-      const bc = tab.linkedBrowser?.browsingContext;
-      const pendingActor = bc && (this._pendingActors.get(bc.browserId) || this._pendingActors.get(bc.id));
-      if (pendingActor) {
-        pendingActor.wireToTarget(target);
-        this._pendingActors.delete(bc.browserId);
-        this._pendingActors.delete(bc.id);
-      } else {
-      }
       target.updateOverridesForBrowsingContext(tab.linkedBrowser.browsingContext);
       if (!hasExplicitSize)
         target.updateViewportSize();
@@ -322,10 +327,17 @@ export class TargetRegistry {
         const domWindow = aSubject;
         if (!domWindow.isChromeWindow || !domWindow.gBrowser)
           return;
-        let appWindow = null;
-        try {
-          appWindow = domWindow.docShell?.treeOwner?.QueryInterface(Ci.nsIAppWindow);
-        } catch(e) {}
+        // The tree owner of a browser window is an nsChromeTreeOwner, which
+        // does not QueryInterface to nsIAppWindow: it hands out its
+        // AppWindow through getInterface. The QueryInterface that was here
+        // threw, the catch swallowed it, and every window that arrived this
+        // way - every window.open popup does - came with a null appWindow.
+        // onTabOpenListener reads the explicit-size chrome flag from it, so a
+        // popup opened with 'width=500,height=400' was resized to the
+        // context's default viewport like a tab.
+        const appWindow = domWindow.docShell.treeOwner
+            .QueryInterface(Ci.nsIInterfaceRequestor)
+            .getInterface(Ci.nsIAppWindow);
         setupWindowTabListeners(appWindow, domWindow);
       }
     }, 'browser-delayed-startup-finished');
@@ -505,6 +517,20 @@ export class TargetRegistry {
     return this._browserIdToTarget.get(browserId);
   }
 
+  // Called by JugglerFrameParent for the actor of a CURRENT top-level document
+  // only: when it is created, and when a document restored from the bfcache
+  // becomes current again.
+  onActorCreated(actor, browserId) {
+    this._browserIdToActor.set(browserId, actor);
+    this._browserIdToTarget.get(browserId)?.setActor(actor);
+  }
+
+  onActorDestroyed(actor, browserId) {
+    this._browserIdToTarget.get(browserId)?.removeActor(actor);
+    if (this._browserIdToActor.get(browserId) === actor)
+      this._browserIdToActor.delete(browserId);
+  }
+
   targetForId(targetId) {
     for (const target of this._browserToTarget.values()) {
       if (target.id() === targetId)
@@ -524,6 +550,9 @@ export class PageTarget {
     this._gBrowser = win.gBrowser;
     this._tab = tab;
     this._linkedBrowser = tab.linkedBrowser;
+    // Kept, not re-read at dispose: the registry entry must be deleted under
+    // the same key it was set under.
+    this._browserId = this._linkedBrowser.browsingContext.browserId;
     this._browserContext = browserContext;
     this._viewportSize = undefined;
     // { screencastId } while a screencast is running on this page, undefined
@@ -563,8 +592,10 @@ export class PageTarget {
     this._disposed = false;
     browserContext.pages.add(this);
     this._registry._browserToTarget.set(this._linkedBrowser, this);
-    this._registry._browserIdToTarget.set(this._linkedBrowser.browsingContext.browserId, this);
-    this._registry._bcIdToTarget.set(this._linkedBrowser.browsingContext.id, this);
+    this._registry._browserIdToTarget.set(this._browserId, this);
+    const actor = this._registry._browserIdToActor.get(this._browserId);
+    if (actor)
+      this.setActor(actor);
 
     this._registry.emit(TargetRegistry.Events.TargetCreated, this);
   }
@@ -603,6 +634,7 @@ export class PageTarget {
 
   setActor(actor) {
     this._actor = actor;
+    actor.actorName = `browser::page[${this._targetId}]/${actor.browsingContext.browserId}/${actor.browsingContext.id}/${this.nextActorSequenceNumber()}`;
     this._channel.bindToActor(actor);
   }
 
@@ -650,6 +682,26 @@ export class PageTarget {
     this.updateColorSchemeOverride(browsingContext);
     this.updateForceOffline(browsingContext);
     this.updateCacheDisabled(browsingContext);
+    this.updateLanguageOverride(browsingContext);
+  }
+
+  // The context's language list goes into the BrowsingContext's
+  // LanguageOverride field, the one Firefox reads for navigator.language(s),
+  // for the realm's default Intl locale (DidSet, and every realm created
+  // later) and for the Accept-Language header (nsHttpHandler prepares it like
+  // intl.accept_languages). BrowsingContext::Attach seeds that field from
+  // juggler.locale.override, so a context that never asked keeps the
+  // session's list untouched.
+  //
+  // This used to go to docShell.languageOverride, which nothing in Firefox
+  // reads, and to docShell.overrideLocale on whatever realm was current when
+  // the setting arrived, usually the initial about:blank: new_context(locale=
+  // "de-DE") inside an it-IT session reported it-IT in navigator.languages,
+  // Intl and the header.
+  updateLanguageOverride(browsingContext = undefined) {
+    if (this._browserContext.languageOverride === undefined)
+      return;
+    (browsingContext || this._linkedBrowser.browsingContext).languageOverride = this._browserContext.languageOverride;
   }
 
   updateForceOffline(browsingContext = undefined) {
@@ -964,8 +1016,7 @@ export class PageTarget {
     }
     this._browserContext.pages.delete(this);
     this._registry._browserToTarget.delete(this._linkedBrowser);
-    this._registry._browserIdToTarget.delete(this._linkedBrowser.browsingContext.browserId);
-    this._registry._bcIdToTarget.delete(this._linkedBrowser.browsingContext.id);
+    this._registry._browserIdToTarget.delete(this._browserId);
     try {
       helper.removeListeners(this._eventListeners);
     } catch (e) {
@@ -1022,6 +1073,8 @@ class BrowserContext {
     this.forceOffline = false;
     this.disableCache = false;
     this.colorScheme = 'none';
+    // undefined until Browser.setLocaleOverride: see PageTarget.updateLanguageOverride.
+    this.languageOverride = undefined;
     this.crossProcessCookie = {
       initScripts: [],
       bindings: [],
@@ -1104,6 +1157,18 @@ class BrowserContext {
     this.defaultUserAgent = userAgent;
     for (const page of this.pages)
       page.updateUserAgent();
+  }
+
+  // A language list ("de-DE, de, en-US, en") or a single tag. Clearing goes
+  // back to the session's list, the one BrowsingContext::Attach seeds every
+  // top-level context with, not to an empty field: an empty LanguageOverride
+  // would hand navigator.languages and Intl back to the build's app locale.
+  setLanguageOverride(locale) {
+    this.languageOverride = locale === undefined
+      ? Services.prefs.getStringPref('juggler.locale.override', '')
+      : locale;
+    for (const page of this.pages)
+      page.updateLanguageOverride();
   }
 
   setTouchOverride(touchOverride) {

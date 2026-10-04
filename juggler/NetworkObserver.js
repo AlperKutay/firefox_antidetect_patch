@@ -5,6 +5,7 @@
 "use strict";
 
 const {Helper} = ChromeUtils.importESModule('chrome://juggler/content/Helper.js');
+const {NetUtil} = ChromeUtils.importESModule('resource://gre/modules/NetUtil.sys.mjs');
 const { ChannelEventSinkFactory } = ChromeUtils.importESModule("chrome://juggler/content/ChannelEventSink.sys.mjs");
 const { newProxyInfoFor } = ChromeUtils.importESModule('chrome://juggler/content/TargetRegistry.js');
 
@@ -253,6 +254,11 @@ class NetworkRequest {
       this.httpChannel.requestMethod = method;
     if (postData !== undefined)
       setPostData(this.httpChannel, postData, headers);
+    // Last, after everything above has set what it sets: this channel is a
+    // replacement built by two internal redirects, and its headers are in the
+    // order Gecko rebuilt them, not the order the request had.
+    if (this._wireHeaderOrder)
+      restoreRequestHeaderOrder(this.httpChannel, this._wireHeaderOrder);
   }
 
   // nsIInterfaceRequestor
@@ -342,6 +348,17 @@ class NetworkRequest {
       return false;
     }
 
+    // ⛔ THE ORDER THE REQUEST WOULD HAVE GONE OUT IN, taken here because this
+    // is the last moment it exists. Interception swaps this channel for an
+    // InterceptedHttpChannel and resuming swaps that for a new nsHttpChannel;
+    // each swap re-creates the standard headers first, copies the rest after
+    // them minus Connection, Cookie and Content-Length, and adds those back
+    // later at the end. Measured on HTTP/1.1 with route.continue_(): Connection
+    // and Cookie after the Sec-Fetch-* group, and on a POST Referer after
+    // Content-Length - an order this browser never sends without a route.
+    // Only for our own interception: a service worker that lets a request
+    // through resets it the same way in a stock Firefox, so that order is real.
+    this._wireHeaderOrder = requestHeaders(channel);
     return true;
   }
 
@@ -501,10 +518,11 @@ class NetworkRequest {
       isIntercepted,
       requestId: this.requestId,
       redirectedFrom: this.redirectedFromId,
-      // Stealthfox 2026-08-24: mai letto - clonava lo stream e lo
-      // base64-codificava per ogni POST, e nessuno lo chiede senza
-      // page.route()/request.postData().
-      postData: undefined,
+      // Stealthfox 2026-08-24 stopped cloning and base64-encoding the body of
+      // every POST. It is read again only while interception is on for the
+      // page or its context: a route handler deciding whether to let a
+      // request through needs it, and other sessions keep the saving.
+      postData: this._shouldIntercept() ? readRequestPostData(this.httpChannel) : undefined,
       headers: requestHeaders(this.httpChannel),
       method: this.httpChannel.requestMethod,
       navigationId: this.navigationId,
@@ -739,9 +757,47 @@ function clearRequestHeaders(httpChannel) {
   }
 }
 
+// A route's headers REPLACE the request's, verbatim: they are the caller's
+// explicit values, usually the ones it just read from the request, and
+// rewriting one would make the same request differ with and without a route.
+// Positions are kept: the headers the request already had stay where they
+// were, with the request's own spelling of the name, and only new ones go at
+// the end.
 function overrideRequestHeaders(httpChannel, headers) {
+  const order = requestHeaders(httpChannel);
   clearRequestHeaders(httpChannel);
-  appendExtraHTTPHeaders(httpChannel, headers);
+  setRequestHeaders(httpChannel, headers);
+  restoreRequestHeaderOrder(httpChannel, order);
+}
+
+function setRequestHeaders(httpChannel, headers) {
+  for (const header of headers)
+    httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
+}
+
+// Puts the channel's headers in `order`: a list of headers as a request
+// carried them, of which only the names, their spelling and their sequence are
+// used. The values stay the channel's own. A header `order` does not name keeps
+// its place relative to the others after them; Host cannot be removed and
+// stays where Gecko put it, first.
+function restoreRequestHeaderOrder(httpChannel, order) {
+  const current = requestHeaders(httpChannel).filter(header => header.name.toLowerCase() !== 'host');
+  const unplaced = new Map(current.map(header => [header.name.toLowerCase(), header]));
+  const sequence = [];
+  for (const { name } of order) {
+    const header = unplaced.get(name.toLowerCase());
+    if (!header)
+      continue;
+    sequence.push({ name, value: header.value });
+    unplaced.delete(name.toLowerCase());
+  }
+  for (const header of current) {
+    if (unplaced.get(header.name.toLowerCase()) === header)
+      sequence.push(header);
+  }
+  for (const header of current)
+    httpChannel.setRequestHeader(header.name, '', false /* merge */);
+  setRequestHeaders(httpChannel, sequence);
 }
 
 const redirectStatus = [301, 302, 303, 307, 308];
@@ -764,32 +820,19 @@ function causeTypeToString(causeType) {
   return 'TYPE_OTHER';
 }
 
+// Extra headers are the caller's explicit values and go out verbatim, as
+// upstream. Accept-Language is not special here: the header Firefox derives
+// for the declared language list comes from nsHttpHandler (see the STEALTHFOX
+// note in AddStandardRequestHeaders), and a caller that sets its own
+// Accept-Language asked for exactly that value. This used to replace it with
+// zoom.stealth.http.accept_language, a second copy of the header built by hand
+// in invisible_core, because the Playwright driver sent the `locale` option as
+// a single-tag extra header; the driver that talks to this engine does not.
 function appendExtraHTTPHeaders(httpChannel, headers) {
   if (!headers)
     return;
-  for (const header of headers) {
-    let value = header.value;
-    // STEALTHFOX: Playwright sets the Accept-Language from the `locale` option as a single
-    // primary tag ("en-US"), which diverges from navigator.languages (the desktop-default
-    // 2-tag list ["en-US","en"]) - a fingerprint tell (browserscan 'language mismatch').
-    //
-    // This used to expand the single tag here, in JavaScript, appending a
-    // hardcoded ";q=0.5" and calling it "the Firefox-native q-valued form". It
-    // is not: stock Firefox 151 sends "en-US,en;q=0.9" (measured 2026-08-09),
-    // and the 0.5 went out on every request of every session. The number was
-    // copied from the stale doc block above PrepareAcceptLanguages in
-    // nsHttpHandler.cpp, while the code below it forwards to
-    // rust_prepare_accept_languages, which does 1.0/0.9/0.8.
-    //
-    // So the header is DECLARED now, by invisible_core, and read here verbatim
-    // (engine rule 7: one source, no compiled copy, no arithmetic on this side).
-    if (header.name.toLowerCase() === 'accept-language' && value) {
-      const declared = Services.prefs.getStringPref('zoom.stealth.http.accept_language', '');
-      if (declared)
-        value = declared;
-    }
-    httpChannel.setRequestHeader(header.name, value, false /* merge */);
-  }
+  for (const header of headers)
+    httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
 }
 
 function responseHead(httpChannel, opt_statusCode, opt_statusText) {
@@ -807,6 +850,49 @@ function responseHead(httpChannel, opt_statusCode, opt_statusText) {
     // when redirect did not actually hit the network.
   }
   return { status, statusText, headers };
+}
+
+function readRequestPostData(httpChannel) {
+  if (!(httpChannel instanceof Ci.nsIUploadChannel))
+    return undefined;
+  let iStream = httpChannel.uploadStream;
+  if (!iStream)
+    return undefined;
+  const isSeekableStream = iStream instanceof Ci.nsISeekableStream;
+  const isTellableStream = iStream instanceof Ci.nsITellableStream;
+
+  // For some reason, we cannot rewind back big streams,
+  // so instead we should clone them.
+  const isCloneable = iStream instanceof Ci.nsICloneableInputStream;
+  if (isCloneable)
+    iStream = iStream.clone();
+
+  let prevOffset;
+  // Surprisingly, stream might implement `nsITellableStream` without
+  // implementing the `tell` method.
+  if (isSeekableStream && isTellableStream && iStream.tell) {
+    prevOffset = iStream.tell();
+    iStream.seek(Ci.nsISeekableStream.NS_SEEK_SET, 0);
+  }
+
+  // Read data from the stream.
+  let result = undefined;
+  try {
+    const maxLen = iStream.available();
+    // Cap at 10Mb.
+    if (maxLen <= 10 * 1024 * 1024) {
+      const buffer = NetUtil.readInputStreamToString(iStream, maxLen);
+      result = btoa(buffer);
+    }
+  } catch (err) {
+  }
+
+  // Seek locks the file, so seek to the beginning only if necko hasn't
+  // read it yet, since necko doesn't seek to 0 before reading (at lest
+  // not till 459384 is fixed).
+  if (isSeekableStream && prevOffset == 0 && !isCloneable)
+    iStream.seek(Ci.nsISeekableStream.NS_SEEK_SET, 0);
+  return result;
 }
 
 function setPostData(httpChannel, postData, headers) {
