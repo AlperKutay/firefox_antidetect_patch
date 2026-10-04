@@ -245,6 +245,10 @@ export class TargetRegistry {
       const tab = event.target;
       const userContextId = tab.userContextId;
       const browserContext = this._userContextIdToBrowserContext.get(userContextId);
+      // Set by nsWindowWatcher::CalculateChromeFlagsForContent when the
+      // window.open features give a size. Such a popup keeps the size the page
+      // asked for, as in every Firefox; the context's default viewport is for
+      // tabs and for popups that did not name one.
       const hasExplicitSize = appWindow && (appWindow.chromeFlags & Ci.nsIWebBrowserChrome.JUGGLER_WINDOW_EXPLICIT_SIZE) !== 0;
       const openerContext = tab.linkedBrowser.browsingContext.opener;
       let openerTarget;
@@ -323,10 +327,17 @@ export class TargetRegistry {
         const domWindow = aSubject;
         if (!domWindow.isChromeWindow || !domWindow.gBrowser)
           return;
-        let appWindow = null;
-        try {
-          appWindow = domWindow.docShell?.treeOwner?.QueryInterface(Ci.nsIAppWindow);
-        } catch(e) {}
+        // The tree owner of a browser window is an nsChromeTreeOwner, which
+        // does not QueryInterface to nsIAppWindow: it hands out its
+        // AppWindow through getInterface. The QueryInterface that was here
+        // threw, the catch swallowed it, and every window that arrived this
+        // way - every window.open popup does - came with a null appWindow.
+        // onTabOpenListener reads the explicit-size chrome flag from it, so a
+        // popup opened with 'width=500,height=400' was resized to the
+        // context's default viewport like a tab.
+        const appWindow = domWindow.docShell.treeOwner
+            .QueryInterface(Ci.nsIInterfaceRequestor)
+            .getInterface(Ci.nsIAppWindow);
         setupWindowTabListeners(appWindow, domWindow);
       }
     }, 'browser-delayed-startup-finished');

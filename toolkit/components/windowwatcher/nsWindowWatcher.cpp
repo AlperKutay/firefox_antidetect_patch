@@ -1916,6 +1916,15 @@ uint32_t nsWindowWatcher::CalculateChromeFlagsForContent(
 
   // Open a minimal popup.
   *aIsPopupRequested = true;
+  // Juggler reads this flag to tell a popup that asked for a size from one
+  // that did not: without it every popup got the browser context's default
+  // viewport, so window.open(url, '', 'width=500,height=400') reported the
+  // tab's 1920x947 where Firefox reports 499x400. HaveSpecifiedSize is the
+  // test this file already uses to decide whether the window gets sized.
+  if (HaveSpecifiedSize(aFeatures)) {
+    return nsIWebBrowserChrome::CHROME_MINIMAL_POPUP |
+           nsIWebBrowserChrome::JUGGLER_WINDOW_EXPLICIT_SIZE;
+  }
   return nsIWebBrowserChrome::CHROME_MINIMAL_POPUP;
 }
 
