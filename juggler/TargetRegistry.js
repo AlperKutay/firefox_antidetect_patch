@@ -682,6 +682,26 @@ export class PageTarget {
     this.updateColorSchemeOverride(browsingContext);
     this.updateForceOffline(browsingContext);
     this.updateCacheDisabled(browsingContext);
+    this.updateLanguageOverride(browsingContext);
+  }
+
+  // The context's language list goes into the BrowsingContext's
+  // LanguageOverride field, the one Firefox reads for navigator.language(s),
+  // for the realm's default Intl locale (DidSet, and every realm created
+  // later) and for the Accept-Language header (nsHttpHandler prepares it like
+  // intl.accept_languages). BrowsingContext::Attach seeds that field from
+  // juggler.locale.override, so a context that never asked keeps the
+  // session's list untouched.
+  //
+  // This used to go to docShell.languageOverride, which nothing in Firefox
+  // reads, and to docShell.overrideLocale on whatever realm was current when
+  // the setting arrived, usually the initial about:blank: new_context(locale=
+  // "de-DE") inside an it-IT session reported it-IT in navigator.languages,
+  // Intl and the header.
+  updateLanguageOverride(browsingContext = undefined) {
+    if (this._browserContext.languageOverride === undefined)
+      return;
+    (browsingContext || this._linkedBrowser.browsingContext).languageOverride = this._browserContext.languageOverride;
   }
 
   updateForceOffline(browsingContext = undefined) {
@@ -1053,6 +1073,8 @@ class BrowserContext {
     this.forceOffline = false;
     this.disableCache = false;
     this.colorScheme = 'none';
+    // undefined until Browser.setLocaleOverride: see PageTarget.updateLanguageOverride.
+    this.languageOverride = undefined;
     this.crossProcessCookie = {
       initScripts: [],
       bindings: [],
@@ -1135,6 +1157,18 @@ class BrowserContext {
     this.defaultUserAgent = userAgent;
     for (const page of this.pages)
       page.updateUserAgent();
+  }
+
+  // A language list ("de-DE, de, en-US, en") or a single tag. Clearing goes
+  // back to the session's list, the one BrowsingContext::Attach seeds every
+  // top-level context with, not to an empty field: an empty LanguageOverride
+  // would hand navigator.languages and Intl back to the build's app locale.
+  setLanguageOverride(locale) {
+    this.languageOverride = locale === undefined
+      ? Services.prefs.getStringPref('juggler.locale.override', '')
+      : locale;
+    for (const page of this.pages)
+      page.updateLanguageOverride();
   }
 
   setTouchOverride(touchOverride) {

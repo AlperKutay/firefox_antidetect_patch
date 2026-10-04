@@ -27,6 +27,8 @@
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_privacy.h"
 #include "mozilla/StoragePrincipalHelper.h"
+#include "mozilla/dom/BrowsingContext.h"
+#include "mozilla/dom/BrowsingContextGroup.h"
 #include "mozilla/dom/Client.h"
 #include "mozilla/dom/ClientIPCTypes.h"
 #include "mozilla/dom/ClientManager.h"
@@ -763,7 +765,9 @@ nsresult ServiceWorkerPrivate::Initialize() {
       // Origin trials are associated to a window, so it doesn't make sense on
       // service workers.
       OriginTrials(), std::move(serviceWorkerData), regInfo->AgentClusterId(),
-      remoteType.unwrap());
+      remoteType.unwrap(),
+      // Filled by RefreshRemoteWorkerData, before every spawn.
+      /* languageOverride */ EmptyCString());
 
   mRemoteWorkerData.referrerInfo() = MakeAndAddRef<ReferrerInfo>(nullptr);
 
@@ -1842,6 +1846,61 @@ void ServiceWorkerPrivate::RefreshRemoteWorkerData(
   serviceWorkerData.descriptor() = mInfo->Descriptor().ToIPC();
   serviceWorkerData.registrationDescriptor() =
       aRegistration->Descriptor().ToIPC();
+
+  mRemoteWorkerData.languageOverride() =
+      ContextLanguageOverride(mInfo->Principal());
+}
+
+// STEALTHFOX: the language of the context a service worker belongs to.
+//
+// A service worker has no owner document: it is keyed by principal, origin
+// attributes included, so it is shared by every page of ONE user context (one
+// Playwright browser context) and only by them. Juggler writes the same
+// LanguageOverride on every top-level BrowsingContext of a context
+// (PageTarget.updateLanguageOverride), so any of those pages answers the
+// question, and the window that registered the worker and the worker itself
+// end up speaking the same language. Retail Firefox 151, measured, gives a
+// window and its dedicated, shared and service workers the same
+// navigator.languages and the same Intl locale; with one language per process
+// that is automatic, with one per context it has to be carried here.
+//
+// Empty when no open page of that context is found, or when its pages
+// disagree (an override set per tab, not by Juggler): the worker then gets the
+// session's declaration in WorkerPrivate, like before this change.
+/* static */
+nsCString ServiceWorkerPrivate::ContextLanguageOverride(
+    nsIPrincipal* aPrincipal) {
+  AssertIsOnMainThread();
+  MOZ_ASSERT(aPrincipal);
+
+  const OriginAttributes& attrs =
+      BasePrincipal::Cast(aPrincipal)->OriginAttributesRef();
+
+  nsTArray<RefPtr<BrowsingContextGroup>> groups;
+  BrowsingContextGroup::GetAllGroups(groups);
+
+  nsCString found;
+  bool seen = false;
+  for (const RefPtr<BrowsingContextGroup>& group : groups) {
+    for (const RefPtr<BrowsingContext>& top : group->Toplevels()) {
+      if (top->IsDiscarded() || !top->IsContent()) {
+        continue;
+      }
+      const OriginAttributes& topAttrs = top->OriginAttributesRef();
+      if (topAttrs.mUserContextId != attrs.mUserContextId ||
+          topAttrs.mPrivateBrowsingId != attrs.mPrivateBrowsingId) {
+        continue;
+      }
+      const nsCString& language = top->GetLanguageOverride();
+      if (!seen) {
+        found = language;
+        seen = true;
+      } else if (!found.Equals(language)) {
+        return EmptyCString();
+      }
+    }
+  }
+  return found;
 }
 
 RefPtr<FetchServicePromises> ServiceWorkerPrivate::SetupNavigationPreload(

@@ -1039,6 +1039,12 @@ class WorkerPrivate final
     return mLoadInfo.mIsOn3PCBExceptionList;
   }
 
+  // STEALTHFOX: the owner's language list, or empty when the worker follows
+  // the process-wide one. See WorkerLoadInfoData::mLanguageOverride.
+  const nsTArray<nsString>& LanguageOverrideList() const {
+    return mLanguageOverrideList;
+  }
+
   RemoteWorkerChild* GetRemoteWorkerController();
 
   void SetRemoteWorkerController(RemoteWorkerChild* aController);
@@ -1536,6 +1542,12 @@ class WorkerPrivate final
   RefPtr<WorkerEventTarget> mWorkerDebuggerEventTarget;
 
   JS::UniqueChars mDefaultLocale;  // nulled during worker JSContext init
+
+  // STEALTHFOX: navigator.languages parsed from mLoadInfo.mLanguageOverride
+  // (empty when there is no override). Written once in the constructor,
+  // before the worker thread exists, and only read afterwards.
+  nsTArray<nsString> mLanguageOverrideList;
+
   TimeStamp mKillTime;
   WorkerStatus mParentStatus MOZ_GUARDED_BY(mMutex);
   WorkerStatus mStatus MOZ_GUARDED_BY(mMutex);

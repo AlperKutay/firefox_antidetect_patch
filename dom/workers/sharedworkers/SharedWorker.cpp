@@ -267,7 +267,7 @@ already_AddRefed<SharedWorker> SharedWorker::Constructor(
       loadInfo.mIsOn3PCBExceptionList,
       OriginTrials::FromWindow(nsGlobalWindowInner::Cast(window)),
       void_t() /* OptionalServiceWorkerData */, agentClusterId,
-      remoteType.unwrap());
+      remoteType.unwrap(), loadInfo.mLanguageOverride);
 
   PSharedWorkerChild* pActor = actorChild->SendPSharedWorkerConstructor(
       remoteWorkerData, loadInfo.mWindowID, portIdentifier.release());

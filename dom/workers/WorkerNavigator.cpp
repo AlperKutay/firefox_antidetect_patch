@@ -69,6 +69,16 @@ already_AddRefed<WorkerNavigator> WorkerNavigator::Create(bool aOnLine) {
   RuntimeService::NavigatorProperties properties =
       rts->GetNavigatorProperties();
 
+  // STEALTHFOX: RuntimeService holds ONE language list for the whole process
+  // (intl.accept_languages). A worker whose owner carries its own
+  // LanguageOverride answers that one instead, the list its window's
+  // navigator.languages answers. See WorkerLoadInfoData::mLanguageOverride.
+  WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate();
+  MOZ_ASSERT(workerPrivate);
+  if (!workerPrivate->LanguageOverrideList().IsEmpty()) {
+    properties.mLanguages = workerPrivate->LanguageOverrideList().Clone();
+  }
+
   RefPtr<WorkerNavigator> navigator = new WorkerNavigator(properties, aOnLine);
 
   return navigator.forget();
