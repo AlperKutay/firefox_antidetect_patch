@@ -47,14 +47,9 @@ export function initialize(browsingContext, docShell) {
       data.failedToOverrideTimezone = !docShell.overrideTimezone(timezoneId);
     },
 
-    locale: (locale) => {
-      // languageOverride drives navigator.language(s) + the Accept-Language
-      // header; overrideLocale applies the same locale to the realm's default
-      // Intl locale (Intl.DateTimeFormat/NumberFormat/toLocaleString), keeping
-      // navigator and Intl consistent for non-US locales.
-      docShell.languageOverride = locale;
-      docShell.overrideLocale(locale);
-    },
+    // No `locale` here: the context's language list is the BrowsingContext's
+    // LanguageOverride field, set from the parent (see
+    // PageTarget.updateLanguageOverride in TargetRegistry.js).
 
     javaScriptDisabled: (javaScriptDisabled) => {
       data.frameTree.setJavaScriptDisabled(javaScriptDisabled);
