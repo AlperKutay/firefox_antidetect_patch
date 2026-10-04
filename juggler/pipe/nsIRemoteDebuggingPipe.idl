@@ -17,4 +17,8 @@ interface nsIRemoteDebuggingPipe : nsISupports
   void init(in nsIRemoteDebuggingPipeClient client);
   void sendMessage(in AString message);
   void stop();
+  // True between init() and stop(): an automation client is attached. Read by
+  // nsCertOverrideService the way it reads a running Marionette or Remote
+  // Agent, so a client can turn on ignoreHTTPSErrors for its own context.
+  readonly attribute boolean connected;
 };

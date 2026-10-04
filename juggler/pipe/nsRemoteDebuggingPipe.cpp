@@ -125,6 +125,15 @@ nsresult nsRemoteDebuggingPipe::Init(nsIRemoteDebuggingPipeClient* aClient) {
   return NS_OK;
 }
 
+nsresult nsRemoteDebuggingPipe::GetConnected(bool* aConnected) {
+  // mClient is main-thread state; a reader elsewhere is told no, not crashed.
+  if (!NS_IsMainThread()) {
+    return NS_ERROR_NOT_SAME_THREAD;
+  }
+  *aConnected = !!mClient;
+  return NS_OK;
+}
+
 nsresult nsRemoteDebuggingPipe::Stop() {
   MOZ_RELEASE_ASSERT(NS_IsMainThread(), "Remote debugging pipe must be used on the Main thread.");
   if (!mClient) {
