@@ -787,9 +787,18 @@ function overrideRequestHeaders(httpChannel, headers) {
   restoreRequestHeaderOrder(httpChannel, order);
 }
 
+// ⛔ AN EMPTY VALUE IS A HEADER, NOT A REMOVAL. setRequestHeader with '' deletes
+// the header (nsHttpHeaderArray::SetHeader), so every header this function set
+// back with an empty value was dropped: a page's `X-Empty:` went out without a
+// route and vanished with one, through both the order repair and a route's
+// own headers. setEmptyRequestHeader keeps it, as a request without a route does.
 function setRequestHeaders(httpChannel, headers) {
-  for (const header of headers)
-    httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
+  for (const header of headers) {
+    if (header.value === '')
+      httpChannel.setEmptyRequestHeader(header.name);
+    else
+      httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
+  }
 }
 
 // Puts the channel's headers in `order`: a list of headers as a request
