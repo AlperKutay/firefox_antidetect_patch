@@ -489,6 +489,10 @@ class NetworkRequest {
   }
 
   _fallThroughInterceptController() {
+    const context = this._networkObserver._targetRegistry.browserContextForUserContextId(
+        this.httpChannel.loadInfo.originAttributes.userContextId);
+    if (context?.serviceWorkersBlocked)
+      return undefined;
     try {
       return this._previousCallbacks?.getInterface(Ci.nsINetworkInterceptController);
     } catch (e) {
@@ -714,6 +718,19 @@ export class NetworkObserver {
     if (!(channel instanceof Ci.nsIHttpChannel))
       return;
     const httpChannel = channel.QueryInterface(Ci.nsIHttpChannel);
+    const loadInfo = httpChannel.loadInfo;
+    const context = this._targetRegistry.browserContextForUserContextId(loadInfo.originAttributes.userContextId);
+    if (context?.serviceWorkersBlocked) {
+      const type = loadInfo.internalContentPolicyType;
+      // The import type is shared with ordinary workers. Only SW update
+      // checks carry this header (ServiceWorkerScriptCache.cpp).
+      const serviceWorkerImport = type === Ci.nsIContentPolicy.TYPE_INTERNAL_WORKER_IMPORT_SCRIPTS &&
+          requestHeaders(httpChannel).some(header => header.name.toLowerCase() === 'service-worker' && header.value === 'script');
+      if (type === Ci.nsIContentPolicy.TYPE_INTERNAL_SERVICE_WORKER || serviceWorkerImport) {
+        httpChannel.cancel(Cr.NS_ERROR_NET_RESET);
+        return;
+      }
+    }
     const channelId = httpChannel.channelId + '';
     const redirectedFrom = this._expectedRedirect.get(channelId);
     if (redirectedFrom) {
@@ -770,9 +787,18 @@ function overrideRequestHeaders(httpChannel, headers) {
   restoreRequestHeaderOrder(httpChannel, order);
 }
 
+// ⛔ AN EMPTY VALUE IS A HEADER, NOT A REMOVAL. setRequestHeader with '' deletes
+// the header (nsHttpHeaderArray::SetHeader), so every header this function set
+// back with an empty value was dropped: a page's `X-Empty:` went out without a
+// route and vanished with one, through both the order repair and a route's
+// own headers. setEmptyRequestHeader keeps it, as a request without a route does.
 function setRequestHeaders(httpChannel, headers) {
-  for (const header of headers)
-    httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
+  for (const header of headers) {
+    if (header.value === '')
+      httpChannel.setEmptyRequestHeader(header.name);
+    else
+      httpChannel.setRequestHeader(header.name, header.value, false /* merge */);
+  }
 }
 
 // Puts the channel's headers in `order`: a list of headers as a request
