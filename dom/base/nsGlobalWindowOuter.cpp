@@ -3715,7 +3715,13 @@ Maybe<nsPoint> nsGlobalWindowOuter::StealthContentOriginShift(
       // Il processo genitore non serve pagine: niente da dichiarare.
       return Nothing();
     }
-    popupOrigin = Some(child->GetOuterRect().TopLeft());
+    LayoutDeviceIntPoint outer;
+    if (NS_FAILED(child->GetDimensions(mozilla::DimensionKind::Outer,
+                                       &outer.x.value, &outer.y.value,
+                                       nullptr, nullptr))) {
+      return Nothing();
+    }
+    popupOrigin = Some(outer);
   }
   return mozilla::gfx::StealthDeclaredOriginShift(real, popupOrigin,
                                                   auPerDevPx);
