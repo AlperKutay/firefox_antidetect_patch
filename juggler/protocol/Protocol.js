@@ -843,9 +843,6 @@ const Page = {
         frameId: t.String,
         objectId: t.String,
         types: t.Array(t.String),
-        // The id `dispatchMouseEvent` returned for the last event sent: the
-        // answer waits for the renderer to have handled it.
-        afterEventId: t.Optional(t.Number),
       },
       returns: {
         landings: t.Array(pageTypes.PointerLanding),
@@ -944,11 +941,10 @@ const Page = {
         clickCount: t.Optional(t.Number),
         buttons: t.Number,
       },
-      returns: {
-        // The renderer acks this id once it has handled the event; 0 when
-        // nothing was dispatched (a press outside the viewport, a drag).
-        eventId: t.Number,
-      },
+      // No return value: the command answers once the page has HANDLED the
+      // event (or a dialog it opened is showing), so a caller's next command
+      // runs after it. The event id it used to return existed so that callers
+      // could wait for that themselves. [B230]
     },
     'dispatchWheelEvent': {
       params: {

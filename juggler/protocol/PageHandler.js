@@ -178,14 +178,8 @@ export class PageHandler {
     // from the press to the release - not as long as one dispatch call. See
     // `_adoptDragSessionIfStarted` for why that distinction is the whole bug.
     this._dragGestureWatcher = null;
-    // A press and a release with nothing in between cannot have started a drag,
-    // so an ordinary click never pays for the question asked at the release.
-    this._gestureMoved = false;
     this._lastMousePosition = { x: 0, y: 0 };
     this._documentScopedWaits = new Set();
-    // The id of the last mouse event handed to the widget, across calls:
-    // the question asked at the release waits for the renderer's ack of it.
-    this._lastMouseEventId = 0;
 
     this._reportedFrameIds = new Set();
     this._networkEventsForUnreportedFrameIds = new Map();
@@ -706,7 +700,6 @@ export class PageHandler {
    */
   _endGesture() {
     this._isDragging = false;
-    this._gestureMoved = false;
     this._disposeDragGestureWatcher();
   }
 
@@ -749,43 +742,6 @@ export class PageHandler {
   }
 
   /**
-   * The release's last word: stop inferring and ASK.
-   *
-   * ⛔ WHY THE WATCHER IS NOT ENOUGH HERE, AND ONLY HERE. Watching is cheap and
-   * needs no round trip, so it carries every movement - but it can only ever be
-   * as fresh as the last thing that arrived, and `sendEvents` does not wait for
-   * the renderer (see `_adoptDragSessionIfStarted`). Everywhere else a miss is
-   * harmless: the next movement catches up. At the release there IS no next
-   * movement, so a miss is final - the release goes out as a plain `mouseup`,
-   * the drop never happens, and the session is left open. That is the case of a
-   * travel made of ONE movement, which is what `humanize=False` emits: the drag
-   * is born by the last event of the gesture and nothing after it can notice.
-   * Measured before this: 1 delivery out of 5. [B213]
-   *
-   * ⛔ THE ANSWER IS NOT ORDERED BEHIND THE INPUT BY THE CHANNEL, AND THIS
-   * DOCSTRING USED TO SAY IT WAS. The content channel is a JSWindowActor on
-   * the same connection as the input, but a `mousemove` is coalesced in the
-   * content process and dispatched at the next refresh tick: "sent before" is
-   * not "handled before". Traced for [B217]: the question reached content and
-   * was answered from an empty record while the page had already seen the
-   * `mouseover` of the very move it asked about. So the question carries the
-   * id of the last mouse event dispatched, and content waits for the
-   * renderer's ack of it before looking at the drag session - the ack that
-   * `PresShell` emits again since [B217]. Measured 5/5 before that was known,
-   * which is how a wrong reason survives: it was right often enough.
-   *
-   * The question is asked at most once per gesture, and only when the gesture
-   * MOVED: a press and a release with nothing in between cannot have started a
-   * drag, so a click pays nothing.
-   */
-  async _adoptDragSessionFromContent() {
-    const answer = await this._contentPage.send('isDragSessionLive', {
-      afterEventId: this._lastMouseEventId,
-    });
-    this._isDragging = !!(answer && answer.live);
-  }
-
-  /**
    * Wait until the page's renderer has HANDLED mouse event `eventId`.
    *
    * ⛔ THE CONTRACT OF `Page.dispatchMouseEvent`, AND THE FORK HAD LOST IT. When
@@ -801,14 +757,15 @@ export class PageHandler {
    * drag source and the drop zone, so the drag never started; and a script read
    * sent after a double click saw two clicks out of three. A low-level probe:
    * 3 reads in 300 before the press was handled. The element actions did not
-   * show it only because they ask `pointerLanded`, which waits for this same
-   * ack; the pointer primitives (Selenium's ActionChains, pyppeteer's Mouse,
+   * show it only because `pointerLanded` used to wait for this same ack on its
+   * own; the pointer primitives (Selenium's ActionChains, pyppeteer's Mouse,
    * Playwright's page.mouse) asked nothing.
    *
    * The ack is the one [B217] added: PresShell notifies it AFTER handling the
    * event, and `FrameTree.whenEventHit` resolves on it. Waiting here, once, puts
    * every later call of every client behind the input, instead of each caller
-   * remembering to ask.
+   * remembering to ask - so the two places that did ask (`pointerLanded` and
+   * the release-time drag question, both with an `afterEventId`) are gone.
    *
    * ⛔ A DIALOG ENDS THE WAIT. A click that opens `alert()` runs the dialog
    * inside its own handler, so the ack comes only once the dialog is closed -
@@ -886,8 +843,7 @@ export class PageHandler {
     const win = this._pageTarget._window;
     const page = await this._pagePixels();
     // The id of the last mouse event handed to the widget, which the renderer
-    // acks once it has handled it. Returned so that a caller can wait for
-    // exactly that event before asking where it landed. [B217]
+    // acks once it has handled it: the command answers after that ack. [B230]
     let lastEventId = 0;
     // False only for the move sent off the web content (below): the renderer of
     // the page never handles it, so there is no ack to wait for.
@@ -963,7 +919,6 @@ export class PageHandler {
         this._dragGestureWatcher = new EventWatcher(
             this._pageEventSink, ['dragstart', 'juggler-drag-finalized'],
             this._pendingEventWatchers);
-        this._gestureMoved = false;
 
         const eventNames = button === 2 ? ['mousedown', 'contextmenu'] : ['mousedown'];
         await sendEvents(eventNames);
@@ -972,8 +927,6 @@ export class PageHandler {
 
       if (type === 'mousemove') {
         this._lastMousePosition = { x, y };
-        if (this._dragGestureWatcher)
-          this._gestureMoved = true;
         // Before deciding what this move is, catch up: the drag may have been
         // born during an earlier call, or in the gap between two of them.
         await this._adoptDragSessionIfStarted();
@@ -1027,12 +980,14 @@ export class PageHandler {
       }
 
       if (type === 'mouseup') {
-        // The last chance to notice, and the only one that cannot be made up
-        // for later: first what we already saw, then - if the gesture moved at
-        // all - the content process itself.
+        // The last chance to notice, and what the watcher holds here is
+        // complete: every move of this gesture was answered only once the page
+        // had handled it (`_awaitInputHandled`), and a `dragstart` it caused
+        // reached this process ahead of that answer, on the same channel. So a
+        // drag born by the last move is seen here, and the question this used
+        // to ask the content process at this point ([B213]) closed a gap that
+        // no longer exists. [B230]
         await this._adoptDragSessionIfStarted();
-        if (!this._isDragging && this._gestureMoved)
-          await this._adoptDragSessionFromContent();
         try {
           if (this._isDragging) {
             const watcher = new EventWatcher(this._pageEventSink, ['dragover'], this._pendingEventWatchers);
@@ -1055,12 +1010,8 @@ export class PageHandler {
         return;
       }
     }, { muteNotificationsPopup: true });
-    if (lastEventId) {
-      this._lastMouseEventId = lastEventId;
-      if (landsInPage)
-        await this._awaitInputHandled(lastEventId);
-    }
-    return { eventId: lastEventId };
+    if (lastEventId && landsInPage)
+      await this._awaitInputHandled(lastEventId);
   }
 
   async ['Page.dispatchWheelEvent']({x, y, button, deltaX, deltaY, deltaZ, modifiers }) {
