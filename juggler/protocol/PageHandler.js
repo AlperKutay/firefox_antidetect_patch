@@ -563,10 +563,6 @@ export class PageHandler {
     return await this._contentPage.send('scrollIntoViewIfNeeded', options);
   }
 
-  async ['Page.pointerLanded'](options) {
-    return await this._contentPage.send('pointerLanded', options);
-  }
-
   async ['Page.setInitScripts']({ scripts }) {
     return await this._pageTarget.setInitScripts(scripts);
   }
@@ -757,15 +753,20 @@ export class PageHandler {
    * drag source and the drop zone, so the drag never started; and a script read
    * sent after a double click saw two clicks out of three. A low-level probe:
    * 3 reads in 300 before the press was handled. The element actions did not
-   * show it only because `pointerLanded` used to wait for this same ack on its
-   * own; the pointer primitives (Selenium's ActionChains, pyppeteer's Mouse,
-   * Playwright's page.mouse) asked nothing.
+   * show it only because `Page.pointerLanded` used to wait for this same ack
+   * on its own; the pointer primitives (Selenium's ActionChains, pyppeteer's
+   * Mouse, Playwright's page.mouse) asked nothing.
    *
    * The ack is the one [B217] added: PresShell notifies it AFTER handling the
    * event, and `FrameTree.whenEventHit` resolves on it. Waiting here, once, puts
    * every later call of every client behind the input, instead of each caller
-   * remembering to ask - so the two places that did ask (`pointerLanded` and
-   * the release-time drag question, both with an `afterEventId`) are gone.
+   * remembering to ask - so the two places that did ask (`Page.pointerLanded`
+   * and the release-time drag question, both with an `afterEventId`) are gone.
+   *
+   * With a `landingToken` (from `armLanding`, before the event was sent) the
+   * answer also carries where the event of `type` LANDED, judged in the same
+   * turn as the ack. Returns that landing, or null: no token, or a dialog
+   * ended the wait.
    *
    * ⛔ A DIALOG ENDS THE WAIT. A click that opens `alert()` runs the dialog
    * inside its own handler, so the ack comes only once the dialog is closed -
@@ -777,9 +778,9 @@ export class PageHandler {
    * was sent and the page has not handled it, and saying "done" would bring the
    * defect back silently. Five seconds, as the other waits on this ack.
    */
-  async _awaitInputHandled(eventId) {
+  async _awaitInputHandled(eventId, type, landingToken) {
     if (this._pageTarget.dialogs().length)
-      return;
+      return null;
     const offs = [];
     const dialogOpened = new Promise(resolve => {
       offs.push(helper.on(this._pageTarget, PageTarget.Events.DialogOpened, resolve));
@@ -788,12 +789,15 @@ export class PageHandler {
     const expired = new Promise(resolve => { timer = setTimeout(() => resolve('expired'), 5000); });
     try {
       const outcome = await Promise.race([
-        this._contentPage.send('awaitInputHandled', { eventId }),
-        dialogOpened,
+        this._contentPage.send('awaitInputHandled', { eventId, type, landingToken }),
+        dialogOpened.then(() => 'dialog'),
         expired,
       ]);
       if (outcome === 'expired')
         throw new Error('the page did not handle mouse event ' + eventId + ' within 5 s');
+      if (outcome === 'dialog')
+        return null;
+      return (outcome && outcome.landing) || null;
     } finally {
       clearTimeout(timer);
       helper.removeListeners(offs);
@@ -839,9 +843,12 @@ export class PageHandler {
     };
   }
 
-  async ['Page.dispatchMouseEvent']({type, x, y, button, clickCount, modifiers, buttons}) {
+  async ['Page.dispatchMouseEvent']({type, x, y, button, clickCount, modifiers, buttons, landsOn}) {
     const win = this._pageTarget._window;
     const page = await this._pagePixels();
+    // The element this event is meant for, held by the content process BEFORE
+    // anything is sent: the event's handler may take it away. [B230]
+    const armed = landsOn ? await this._contentPage.send('armLanding', landsOn) : null;
     // The id of the last mouse event handed to the widget, which the renderer
     // acks once it has handled it: the command answers after that ack. [B230]
     let lastEventId = 0;
@@ -1010,8 +1017,14 @@ export class PageHandler {
         return;
       }
     }, { muteNotificationsPopup: true });
-    if (lastEventId && landsInPage)
-      await this._awaitInputHandled(lastEventId);
+    if (!lastEventId || !landsInPage) {
+      if (!armed)
+        return {};
+      return { landing: { type, landed: false, seen: 0,
+                          on: landsInPage ? 'no mouse event was dispatched' : 'a point outside the page' } };
+    }
+    const landing = await this._awaitInputHandled(lastEventId, type, armed ? armed.token : 0);
+    return landing ? { landing } : {};
   }
 
   async ['Page.dispatchWheelEvent']({x, y, button, deltaX, deltaY, deltaZ, modifiers }) {

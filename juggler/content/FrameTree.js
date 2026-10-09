@@ -113,7 +113,7 @@ export class FrameTree {
 
     this._inputEventListeners = [];
     // Where the last pointer event of each type actually landed, per
-    // document. Read back by `PageAgent._pointerLanded`. [B217]
+    // document. Read back by `PageAgent._landingOn`. [B217]
     this._pointerLanding = new Map();
     this._lastHitEventId = 0;
   }
