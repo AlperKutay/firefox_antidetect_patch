@@ -2360,12 +2360,49 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
   }
 
   // Set up left/top
-  if (aSizeSpec.mLeft) {
-    left = *aSizeSpec.mLeft;
-  }
+  //
+  // Stealth: a window a PAGE opens is placed in the PERSONA's pixels, at the
+  // declared default when the page names no position (70-known-bugs.md B258).
+  //
+  // The page's left/top are desktop pixels, and on retail the desktop scale is
+  // the display scale, which is the scale the page sees: at 125%, left=100 puts
+  // the window at 125 device pixels and screenX answers 100. Here the persona's
+  // scale comes from layout.css.devPixelsPerPx while the host display may be at
+  // 100%, so the stock arithmetic would put it at 100 device pixels and screenX
+  // would answer 80. Converting through the persona's CSS scale gives the
+  // retail answer on any host. Without a position, retail Firefox 151 on
+  // Windows 11 puts a popup at 4,4 device pixels (3,3 CSS at 125%, 2,2 at
+  // 200%), and the host would put it anywhere - Windows staggers from the
+  // opener, a bare X server has no window manager at all. A popup's screenX is
+  // its REAL position (nsGlobalWindowOuter::GetScreenXY), so it is blocked
+  // here, at birth, and nothing corrects it afterwards (engine rule 3).
+  // Chrome callers keep the stock behaviour.
+  const Maybe<mozilla::gfx::StealthWindowFrame> stealthFrame =
+      aIsCallerChrome ? Nothing() : mozilla::gfx::StealthDeclaredWindowFrame();
+  if (stealthFrame) {
+    const CSSToLayoutDeviceScale cssToDev =
+        treeOwnerAsWin->UnscaledDevicePixelsPerCSSPixel();
+    const DesktopToLayoutDeviceScale devToDesktop =
+        treeOwnerAsWin->DevicePixelsPerDesktopPixel();
+    auto toDesktop = [&](LayoutDeviceCoord aDevice) {
+      return DesktopIntCoord((aDevice / devToDesktop).Rounded());
+    };
+    const DesktopIntCoord byDefault =
+        toDesktop(LayoutDeviceCoord(stealthFrame->mPopupPosition));
+    left = aSizeSpec.mLeft
+               ? toDesktop(CSSCoord(float(aSizeSpec.mLeft->value)) * cssToDev)
+               : byDefault;
+    top = aSizeSpec.mTop
+              ? toDesktop(CSSCoord(float(aSizeSpec.mTop->value)) * cssToDev)
+              : byDefault;
+  } else {
+    if (aSizeSpec.mLeft) {
+      left = *aSizeSpec.mLeft;
+    }
 
-  if (aSizeSpec.mTop) {
-    top = *aSizeSpec.mTop;
+    if (aSizeSpec.mTop) {
+      top = *aSizeSpec.mTop;
+    }
   }
 
   // Set up width
@@ -2384,7 +2421,7 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
     height = *aSizeSpec.mInnerHeight;
   }
 
-  bool positionSpecified = aSizeSpec.PositionSpecified();
+  bool positionSpecified = aSizeSpec.PositionSpecified() || stealthFrame;
 
   // Check security state for use in determining window dimensions
   bool enabled = false;
@@ -2496,26 +2533,6 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
       if (top != oldTop || left != oldLeft) {
         positionSpecified = true;
       }
-    }
-  }
-
-  // Stealth: a window a PAGE opens without left/top is born at the declared
-  // default position, not wherever the host puts it. Retail Firefox 151 on
-  // Windows 11 opens it at 4,4 device pixels (3,3 CSS at 125%, 2,2 at 200%;
-  // 70-known-bugs.md B258); the host would put it anywhere - Windows staggers
-  // from the opener, a bare X server has no window manager at all - and a
-  // popup's screenX is its REAL position (nsGlobalWindowOuter::GetScreenXY).
-  // Blocked at birth, so both builds have the same real position and nothing
-  // has to be corrected afterwards (engine rule 3). Chrome callers keep the
-  // stock behaviour.
-  if (!aIsCallerChrome && !positionSpecified) {
-    if (const auto frame = mozilla::gfx::StealthDeclaredWindowFrame()) {
-      const DesktopToLayoutDeviceScale devToDesktopScale =
-          treeOwnerAsWin->DevicePixelsPerDesktopPixel();
-      left = (LayoutDeviceCoord(frame->mPopupPosition) / devToDesktopScale)
-                 .Rounded();
-      top = left;
-      positionSpecified = true;
     }
   }
 
