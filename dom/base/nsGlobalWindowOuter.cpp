@@ -3527,32 +3527,50 @@ CSSIntSize nsGlobalWindowOuter::GetOuterSize(CallerType aCallerType,
     return {};
   }
 
-  // Stealth: spoof outerWidth/outerHeight to match the spoofed screen.
-  // outerWidth  = screen.width        (maximized window fills full screen width)
-  // outerHeight = screen.height - taskbar (matches screen.availHeight)
-  // Without this, the real OS window size leaks: outerWidth > screen.width is
-  // physically impossible on a real machine and is flagged as spoofing.
+  // Stealth: the outer size from the declared window, in device pixels,
+  // converted below with the window's own scale exactly like the real size.
   //
-  // The taskbar height is DECLARED, and this is the third place that used to
-  // hardcode 48 - the other two being nsScreen::GetAvailRect and the
-  // generator's Python. It has to agree with availHeight or outerHeight and
-  // availHeight contradict each other, which is a check that needs nothing but
-  // arithmetic.
-  {
-    int32_t sw = mozilla::StaticPrefs::zoom_stealth_screen_width();
-    int32_t sh = mozilla::StaticPrefs::zoom_stealth_screen_height();
-    if (sw > 0 && sh > 0) {
-      // No compiled floor (engine rule 7, 2026-08-09). The taskbar height is
-      // declared by invisible_core and by nothing else; the "? declared : 48"
-      // that used to close this line was the FOURTH copy of that number, after
-      // nsScreen, the generator's Python and the wrapper's launcher - and the
-      // wrapper's said 40 while the other three said 48, which is the whole
-      // argument for one source in one sentence. A missing declaration refuses
-      // in StealthDeclarationGate instead of being papered over here.
-      mozilla::gfx::StealthAssertDeclarationsComplete();
-      return CSSIntSize(
-          sw, sh - mozilla::StaticPrefs::zoom_stealth_screen_taskbar_px());
+  // The MAIN window is maximized: the work area plus Windows' invisible resize
+  // border on each side (retail 151, 100%: outerWidth - availWidth = 16). Until
+  // firefox-38 this answered the work area itself, a window that does not
+  // exist maximized on Windows (B261). A POPUP is its real inner size plus its
+  // frame - a border on the left, right and bottom, the popup UI above - where
+  // it used to answer the maximized window's size, 1920x1032 for a
+  // width=500,height=400 popup (B258). The inner size is the top-level one,
+  // synced to every process in the BrowsingContext (see
+  // nsPresContext::UpdateInnerSizeSpoofedForRFP), so an out-of-process iframe
+  // in the popup answers the same.
+  //
+  // No compiled value anywhere: a missing declaration refuses in
+  // StealthDeclarationGate instead of being papered over here.
+  if (mozilla::gfx::StealthEngineActive()) {
+    mozilla::gfx::StealthAssertDeclarationsComplete();
+    nsCOMPtr<nsIBaseWindow> treeOwnerAsWin = GetTreeOwnerWindow();
+    if (!treeOwnerAsWin) {
+      aError.Throw(NS_ERROR_FAILURE);
+      return {};
     }
+    const CSSToLayoutDeviceScale scale =
+        CSSToDevScaleForBaseWindow(treeOwnerAsWin);
+    if (IsInStealthPopup()) {
+      const auto frame = mozilla::gfx::StealthDeclaredWindowFrame();
+      BrowsingContext* bc = GetBrowsingContext();
+      if (frame && bc) {
+        const LayoutDeviceIntSize inner =
+            RoundedToInt(CSSSize(bc->TopInnerSizeSpoofedForRFP().width,
+                                 bc->TopInnerSizeSpoofedForRFP().height) *
+                         scale);
+        const LayoutDeviceIntSize outer =
+            inner + LayoutDeviceIntSize(2 * frame->mBorder,
+                                        frame->mPopupUi + frame->mBorder);
+        return RoundedToInt(outer / scale);
+      }
+    } else if (const auto maximized =
+                   mozilla::gfx::StealthDeclaredMaximizedWindow()) {
+      return RoundedToInt(maximized->Size() / scale);
+    }
+    // Unreachable: the gate refuses at launch without the declaration.
+    return {};
   }
 
   // Windows showing documents in RDM panes and any subframes within them
@@ -3610,19 +3628,24 @@ CSSIntPoint nsGlobalWindowOuter::GetScreenXY(CallerType aCallerType,
     return CSSIntPoint(0, 0);
   }
 
-  // Stealth: the window POSITION, which outerWidth/outerHeight above already
-  // depend on without ever saying so. They claim a maximized window filling the
-  // screen; the position stayed whatever the OS handed the headless widget, and
-  // on Windows that is (4,4), so screenX + outerWidth came to 1924 on a 1920
-  // screen. Stock 151 reports 0,0 for exactly this window shape.
-  if (const auto origin = mozilla::gfx::StealthDeclaredWindowOrigin()) {
-    return *origin;
-  }
-
   nsCOMPtr<nsIBaseWindow> treeOwnerAsWin = GetTreeOwnerWindow();
   if (!treeOwnerAsWin) {
     aError.Throw(NS_ERROR_FAILURE);
     return CSSIntPoint(0, 0);
+  }
+
+  // Stealth: the MAIN window's position is the declared maximized window's,
+  // a resize border off the screen (-8 at 100%, -7 at 125%, -6 at 200% on
+  // retail 151), which outerWidth above depends on: until 2026-08-09 the
+  // position stayed whatever the OS handed the headless widget, and screenX +
+  // outerWidth came to 1924 on a 1920 screen. A POPUP keeps its REAL
+  // position: the page chose it, or nsWindowWatcher put it at the declared
+  // default when the page did not, so it is the same on both builds.
+  if (mozilla::gfx::StealthEngineActive() && !IsInStealthPopup()) {
+    if (const auto maximized = mozilla::gfx::StealthDeclaredMaximizedWindow()) {
+      return RoundedToInt(maximized->TopLeft() /
+                          CSSToDevScaleForBaseWindow(treeOwnerAsWin));
+    }
   }
 
   LayoutDeviceIntPoint windowPos;
@@ -3660,29 +3683,46 @@ nsRect nsGlobalWindowOuter::GetInnerScreenRect() {
   return rootFrame->GetScreenRectInAppUnits();
 }
 
-nsPoint nsGlobalWindowOuter::GetRealTopLevelContentOrigin() {
-  // La STESSA quantita' che Event.cpp passa allo scarto: l'offset su schermo
-  // del root widget. In un processo di contenuto e' il PuppetWidget, il cui
-  // offset e' l'origine dell'area di contenuto di primo livello - per il
-  // documento top coincide con GetInnerScreenRect(), per un sottoframe no, ed e'
-  // proprio quella differenza che va conservata.
-  if (!mDocShell) {
-    return nsPoint();
+/* static */
+Maybe<nsPoint> nsGlobalWindowOuter::StealthContentOriginShift(
+    nsPresContext* aPresContext) {
+  if (!aPresContext || !mozilla::gfx::StealthEngineActive()) {
+    return Nothing();
   }
-  PresShell* presShell = mDocShell->GetPresShell();
-  if (!presShell) {
-    return nsPoint();
-  }
-  nsPresContext* pc = presShell->GetPresContext();
-  if (!pc) {
-    return nsPoint();
-  }
-  nsCOMPtr<nsIWidget> rootWidget = pc->GetRootWidget();
+  // L'origine reale e' l'offset su schermo del root widget: nel processo di
+  // contenuto e' il PuppetWidget, il cui offset e' l'origine dell'area di
+  // contenuto di primo livello - per il documento top coincide con
+  // GetInnerScreenRect(), per un sottoframe no, ed e' proprio quella
+  // differenza che va conservata. Solo chiamate al widget, niente layout:
+  // Event.cpp chiama questa funzione per ogni evento del mouse.
+  nsCOMPtr<nsIWidget> rootWidget = aPresContext->GetRootWidget();
   if (!rootWidget) {
-    return nsPoint();
+    return Nothing();
   }
-  return LayoutDevicePixel::ToAppUnits(rootWidget->WidgetToScreenOffset(),
-                                       pc->AppUnitsPerDevPixel());
+  const int32_t auPerDevPx = aPresContext->AppUnitsPerDevPixel();
+  const nsPoint real = LayoutDevicePixel::ToAppUnits(
+      rootWidget->WidgetToScreenOffset(), auPerDevPx);
+  // Un popup si dichiara dalla sua posizione REALE: il rettangolo esterno della
+  // finestra di primo livello, che BrowserChild riceve dal genitore - anche in
+  // un iframe fuori processo, dove arriva dall'embedder. E' la stessa fonte di
+  // GetScreenXY (nsIBaseWindow::GetPosition del tree owner).
+  Maybe<LayoutDeviceIntPoint> popupOrigin;
+  Document* doc = aPresContext->Document();
+  BrowsingContext* bc = doc ? doc->GetBrowsingContext() : nullptr;
+  if (bc && bc->Top()->GetIsPopupRequested()) {
+    BrowserChild* child = rootWidget->GetOwningBrowserChild();
+    if (!child) {
+      // Il processo genitore non serve pagine: niente da dichiarare.
+      return Nothing();
+    }
+    popupOrigin = Some(child->GetOuterRect().TopLeft());
+  }
+  return mozilla::gfx::StealthDeclaredOriginShift(real, popupOrigin,
+                                                  auPerDevPx);
+}
+
+bool nsGlobalWindowOuter::IsInStealthPopup() const {
+  return mBrowsingContext && mBrowsingContext->Top()->GetIsPopupRequested();
 }
 
 Maybe<CSSIntSize> nsGlobalWindowOuter::GetRDMDeviceSize(
@@ -3749,8 +3789,8 @@ float nsGlobalWindowOuter::GetMozInnerScreenXOuter(CallerType aCallerType) {
   // livello. Sommando lo scarto al rettangolo REALE della finestra, l'offset
   // fra i frame resta vero e la relazione vale a ogni profondita'.
   nsRect r = GetInnerScreenRect();
-  if (const auto shift = mozilla::gfx::StealthDeclaredOriginShift(
-          GetRealTopLevelContentOrigin())) {
+  RefPtr<nsPresContext> pc = mDocShell ? mDocShell->GetPresContext() : nullptr;
+  if (const auto shift = StealthContentOriginShift(pc)) {
     return nsPresContext::AppUnitsToFloatCSSPixels(r.x + shift->x);
   }
   return nsPresContext::AppUnitsToFloatCSSPixels(r.x);
@@ -3763,13 +3803,13 @@ float nsGlobalWindowOuter::GetMozInnerScreenYOuter(CallerType aCallerType) {
     return 0.0;
   }
 
-  // Stealth: see GetMozInnerScreenXOuter. Vertically the whole chrome is above
-  // the content - tab strip plus navigation toolbar - so the content starts at
-  // window_y + chrome_h. Stock 151 measured 85 here and reports exactly
-  // mozInnerScreenY - screenY == outerHeight - innerHeight.
+  // Stealth: see GetMozInnerScreenXOuter. A maximized window's content starts
+  // the UI height below the screen top - 85 device pixels at 100%, 107 at 125%,
+  // which reads 85.6 like retail 151 - and a popup's the popup UI below its
+  // own top.
   nsRect r = GetInnerScreenRect();
-  if (const auto shift = mozilla::gfx::StealthDeclaredOriginShift(
-          GetRealTopLevelContentOrigin())) {
+  RefPtr<nsPresContext> pc = mDocShell ? mDocShell->GetPresContext() : nullptr;
+  if (const auto shift = StealthContentOriginShift(pc)) {
     return nsPresContext::AppUnitsToFloatCSSPixels(r.y + shift->y);
   }
   return nsPresContext::AppUnitsToFloatCSSPixels(r.y);

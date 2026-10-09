@@ -71,78 +71,85 @@ inline bool StealthEngineActive() {
 void StealthAssertDeclarationsComplete();
 
 /**
- * Where the window is, and where its content starts, in CSS pixels.
+ * The window frame and the maximized window, in DEVICE pixels.
  *
- * These two exist so that the answer is computed ONCE and read by everyone who
- * can be asked it, instead of each caller reading the prefs for itself. That is
- * not tidiness. On 2026-08-09 three DOM getters were moved onto the
- * declaration - screenX/screenY, mozInnerScreenX and mozInnerScreenY - and the
- * event path was not, because nothing connected the two in the source. The
- * result was a contradiction a page reads with one subtraction:
+ * One function per fact, read by everyone who can be asked it, instead of each
+ * caller reading the prefs for itself. That is not tidiness. On 2026-08-09 three
+ * DOM getters were moved onto the declaration - screenX/screenY,
+ * mozInnerScreenX and mozInnerScreenY - and the event path was not, because
+ * nothing connected the two in the source. The result was a contradiction a
+ * page reads with one subtraction:
  *
  *     event.screenX - event.clientX === window.mozInnerScreenX
  *
  * holds on every real Firefox, because both sides come from the same widget.
  * With the geometry declared in one place and the events still asking the
  * widget, it held on NONE of 45 events on Windows and none of 20 on Linux,
- * against 0 failures out of 6 on stock. Humanised movement made it worse, since
- * it emits dozens of events per action and every one of them is a fresh sample
- * of the same broken relation.
+ * against 0 failures out of 6 on stock.
  *
- * So the invariant is restored the only way that keeps holding when somebody
- * adds a new geometry-reading API next month: there is one function, everything
- * calls it, and the relation is true by construction rather than by two callers
- * happening to agree.
+ * DEVICE pixels since firefox-38 (70-known-bugs.md B258, B261). The previous
+ * declaration was four CSS integers - a window at (0, 0), no side border, the
+ * content 85 below - read the same for every window. Retail Firefox 151 on
+ * Windows 11, measured at the four persona scales, says otherwise: a maximized
+ * window sits a resize border OFF the screen on three sides (-8 at 100%) and is
+ * two borders wider than the work area; its content starts 85 device pixels
+ * below the screen top at 100% and 107 at 125%, i.e. 85.6 CSS, a value no CSS
+ * integer can carry; and a popup has its own frame and its own position. In
+ * device pixels that is one rule, and each reader converts with its window's
+ * own scale and Gecko's rounding, as it does for the real values.
  *
- * Both return Nothing() when the engine is off, which is stock Firefox and not
- * an incomplete declaration. When the engine is on they never fall back: a
- * missing declaration goes to StealthAssertDeclarationsComplete(), and the gate
- * has already refused at launch in the parent, so content processes cannot
- * reach a state where these are undeclared.
- *
- * CSS pixels, deliberately. The widget layer underneath works in device pixels
- * and does not know the CSS scale - `layout.css.devPixelsPerPx` is applied
- * above it, in the device context - so declaring down there would have meant
- * converting with a number the widget cannot see.
+ * Nothing() when the engine is off, which is stock Firefox and not an
+ * incomplete declaration. When the engine is on they never fall back: a missing
+ * declaration goes to StealthAssertDeclarationsComplete(), and the gate has
+ * already refused at launch in the parent.
  */
-Maybe<CSSIntPoint> StealthDeclaredWindowOrigin();
+struct StealthWindowFrame {
+  // Invisible resize border, on the left, right and bottom of every window and
+  // on the top of a popup.
+  int32_t mBorder;
+  // A maximized window: from the screen top to the content top.
+  int32_t mMaximizedUi;
+  // A popup: from the window top (border included) to the content top.
+  int32_t mPopupUi;
+  // A popup opened without left/top: where it is put, on both axes.
+  int32_t mPopupPosition;
+};
+Maybe<StealthWindowFrame> StealthDeclaredWindowFrame();
 
 /**
- * The content origin: the window origin plus the chrome around it. Horizontal
- * chrome is the TOTAL of both sides, so half of it sits to the left; vertical
- * chrome is entirely above, which is the tab strip and the toolbar.
+ * The maximized main window: (-border, -border), the work area plus a border on
+ * each side. Device pixels; the caller divides by its window's scale.
  */
-Maybe<CSSIntPoint> StealthDeclaredContentOrigin();
+Maybe<LayoutDeviceIntRect> StealthDeclaredMaximizedWindow();
 
 /**
- * Lo SCARTO fra le coordinate reali dello schermo e quelle dichiarate, in app
+ * Lo SCARTO fra l'origine reale del contenuto e quella dichiarata, in app
  * units. Nothing() quando il motore e' spento.
  *
  * Esiste perche' la sostituzione secca non basta, e la prima versione di questa
  * patch lo ha dimostrato sul campo. `mozInnerScreenX` restituiva l'origine
  * dichiarata a OGNI finestra, iframe compresi: misurato il 2026-08-10, un
  * iframe posizionato a (220, 150) nella pagina rispondeva (0, 85) esattamente
- * come il documento di primo livello, e dentro quell'iframe l'invariante che
- * questa patch esiste per difendere
+ * come il documento di primo livello, e dentro quell'iframe l'invariante sopra
+ * dava 220 contro 0. Non si SOSTITUISCE il valore, si sposta l'ANCORA: il
+ * chiamante passa la propria origine reale e somma lo scarto, cosi' l'offset fra
+ * i frame resta quello vero a qualsiasi profondita'.
  *
- *     event.screenX - event.clientX === window.mozInnerScreenX
- *
- * dava 220 contro 0. La contraddizione era stata tolta al primo livello e
- * ricreata identica un livello sotto, e il gate non se ne accorgeva perche'
- * guardava solo il primo livello.
- *
- * La forma giusta e' quella che Event.cpp usava gia': non si SOSTITUISCE il
- * valore, si sposta l'ANCORA. Il chiamante passa la propria origine reale - per
- * il documento di primo livello e' l'offset del root widget, per un sottoframe
- * e' il rettangolo del suo root frame - e somma lo scarto. Cosi' l'offset
- * relativo fra i frame resta quello vero, e la relazione fra eventi e geometria
- * vale a QUALSIASI profondita' di annidamento per costruzione, invece che a un
- * livello solo perche' due chiamanti si trovano d'accordo.
+ * `aPopupWindowOrigin` decide QUALE finestra si dichiara. Nothing() e' la
+ * finestra principale massimizzata, il cui contenuto parte da (0, interfaccia)
+ * sullo schermo dichiarato. Some(p) e' un popup, la cui posizione e' quella
+ * REALE (la sceglie la pagina, o nsWindowWatcher dalla dichiarazione quando la
+ * pagina non la chiede) e il cui contenuto parte da p + (bordo, interfaccia del
+ * popup). In pixel di dispositivo; `aAppUnitsPerDevPixel` e' quello del
+ * pres context del chiamante.
  *
  * Una funzione sola, perche' lo scarto e' un fatto e i fatti stanno in un posto:
  * quando era calcolato in tre punti, il quarto consumatore fu dimenticato.
  */
-Maybe<nsPoint> StealthDeclaredOriginShift(const nsPoint& aRealContentOrigin);
+Maybe<nsPoint> StealthDeclaredOriginShift(
+    const nsPoint& aRealContentOrigin,
+    const Maybe<LayoutDeviceIntPoint>& aPopupWindowOrigin,
+    int32_t aAppUnitsPerDevPixel);
 
 }  // namespace gfx
 }  // namespace mozilla

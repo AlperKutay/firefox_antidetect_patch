@@ -20459,22 +20459,49 @@
   value: -1
   mirror: always
 
-- name: zoom.stealth.screen.window_x
+# The window frame, in DEVICE pixels, measured on retail Firefox 151 on
+# Windows 11 at the four persona scales (70-known-bugs.md B258, B261). Device
+# pixels because that is where the rule is one rule: an invisible resize border
+# on three sides (8, 9, 11, 13 at 100/125/150/200%), the browser UI above the
+# content of a maximized window, the popup UI above its content, and the
+# default position of a popup opened without one. The engine converts with the
+# window's own scale and Gecko's rounding, as it does for the real values, so
+# 107 device pixels at 1.25 read 85.6 CSS like retail does.
+#
+# They replace screen.window_x/window_y/chrome_w/chrome_h (CSS integers), whose
+# model was a window at (0, 0) with no border: a maximized Windows window sits
+# at (-8, -8) and is 16 wider than the work area, and every popup answered the
+# maximized window's numbers.
+- name: zoom.stealth.screen.frame_border
   type: RelaxedAtomicInt32
   value: -1
   mirror: always
 
-- name: zoom.stealth.screen.window_y
+- name: zoom.stealth.screen.maximized_ui
   type: RelaxedAtomicInt32
   value: -1
   mirror: always
 
-- name: zoom.stealth.screen.chrome_w
+- name: zoom.stealth.screen.popup_ui
   type: RelaxedAtomicInt32
   value: -1
   mirror: always
 
-- name: zoom.stealth.screen.chrome_h
+- name: zoom.stealth.screen.popup_position
+  type: RelaxedAtomicInt32
+  value: -1
+  mirror: always
+
+# The work area in device pixels (panel minus the taskbar at the persona's
+# scale): the maximized window is this plus a border on each side. The CSS
+# screen and taskbar above stay what nsScreen answers; the core derives both
+# from the same panel, so they agree.
+- name: zoom.stealth.screen.avail_device_width
+  type: RelaxedAtomicInt32
+  value: -1
+  mirror: always
+
+- name: zoom.stealth.screen.avail_device_height
   type: RelaxedAtomicInt32
   value: -1
   mirror: always

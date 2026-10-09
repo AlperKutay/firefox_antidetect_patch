@@ -75,6 +75,7 @@
 #include "nsIAppWindow.h"
 #include "nsIXULBrowserWindow.h"
 #include "ReferrerInfo.h"
+#include "StealthDeclarationGate.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -2495,6 +2496,26 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
       if (top != oldTop || left != oldLeft) {
         positionSpecified = true;
       }
+    }
+  }
+
+  // Stealth: a window a PAGE opens without left/top is born at the declared
+  // default position, not wherever the host puts it. Retail Firefox 151 on
+  // Windows 11 opens it at 4,4 device pixels (3,3 CSS at 125%, 2,2 at 200%;
+  // 70-known-bugs.md B258); the host would put it anywhere - Windows staggers
+  // from the opener, a bare X server has no window manager at all - and a
+  // popup's screenX is its REAL position (nsGlobalWindowOuter::GetScreenXY).
+  // Blocked at birth, so both builds have the same real position and nothing
+  // has to be corrected afterwards (engine rule 3). Chrome callers keep the
+  // stock behaviour.
+  if (!aIsCallerChrome && !positionSpecified) {
+    if (const auto frame = mozilla::gfx::StealthDeclaredWindowFrame()) {
+      const DesktopToLayoutDeviceScale devToDesktopScale =
+          treeOwnerAsWin->DevicePixelsPerDesktopPixel();
+      left = (LayoutDeviceCoord(frame->mPopupPosition) / devToDesktopScale)
+                 .Rounded();
+      top = left;
+      positionSpecified = true;
     }
   }
 
