@@ -75,6 +75,7 @@
 #include "nsIAppWindow.h"
 #include "nsIXULBrowserWindow.h"
 #include "ReferrerInfo.h"
+#include "StealthDeclarationGate.h"
 
 using namespace mozilla;
 using namespace mozilla::dom;
@@ -2367,6 +2368,37 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
     top = *aSizeSpec.mTop;
   }
 
+  // Stealth: a window a PAGE opens without left/top is born at the declared
+  // default position, not wherever the host puts it (70-known-bugs.md B258).
+  // Retail Firefox 151 on Windows 11 opens it at 4,4 device pixels (3,3 CSS at
+  // 125%, 2,2 at 200%); the host would put it anywhere - Windows staggers from
+  // the opener, a bare X server has no window manager at all - and a popup's
+  // screenX is its REAL position (nsGlobalWindowOuter::GetScreenXY). Blocked
+  // here, at birth, so both builds have the same real position and nothing
+  // corrects it afterwards (engine rule 3). Chrome callers keep the stock
+  // behaviour.
+  //
+  // A position the page DOES give needs nothing: CalcSizeSpec has already
+  // turned its CSS pixels into desktop pixels with the opener's own
+  // CSS-to-desktop scale, which carries the persona's scale and the host
+  // display's together. Measured on the Linux build at 1.25, 1.5 and 2: a
+  // second conversion here put left=100 at screenX 125, 150 and 200.
+  const Maybe<mozilla::gfx::StealthWindowFrame> stealthFrame =
+      aIsCallerChrome ? Nothing() : mozilla::gfx::StealthDeclaredWindowFrame();
+  if (stealthFrame) {
+    const DesktopToLayoutDeviceScale devToDesktop =
+        treeOwnerAsWin->DevicePixelsPerDesktopPixel();
+    const DesktopIntCoord byDefault = DesktopIntCoord(
+        (LayoutDeviceCoord(stealthFrame->mPopupPosition) / devToDesktop)
+            .Rounded());
+    if (!aSizeSpec.mLeft) {
+      left = byDefault;
+    }
+    if (!aSizeSpec.mTop) {
+      top = byDefault;
+    }
+  }
+
   // Set up width
   if (aSizeSpec.mOuterWidth) {
     width = *aSizeSpec.mOuterWidth;
@@ -2383,7 +2415,7 @@ static void SizeOpenedWindow(nsIDocShellTreeOwner* aTreeOwner,
     height = *aSizeSpec.mInnerHeight;
   }
 
-  bool positionSpecified = aSizeSpec.PositionSpecified();
+  bool positionSpecified = aSizeSpec.PositionSpecified() || stealthFrame;
 
   // Check security state for use in determining window dimensions
   bool enabled = false;

@@ -145,21 +145,27 @@ void StealthAssertDeclarationsComplete() {
        []() { return StaticPrefs::zoom_stealth_text_freetype_hintstyle(); }, 0},
       {"zoom.stealth.text.freetype_antialias",
        []() { return StaticPrefs::zoom_stealth_text_freetype_antialias(); }, 0},
-      // The window geometry, added 2026-08-09. Four values that three getters
-      // read in different combinations - screenX, mozInnerScreenX and
-      // outerWidth - which is exactly the shape that produced an impossible
-      // window when only some of them were declared: screenX + outerWidth came
-      // to 1924 on a 1920 screen. A floor of 0 on all four: a maximized window
-      // sits at the origin and stock reports no horizontal chrome, so 0 is a
-      // legal value here and the sentinel has to be -1.
-      {"zoom.stealth.screen.window_x",
-       []() { return StaticPrefs::zoom_stealth_screen_window_x(); }, 0},
-      {"zoom.stealth.screen.window_y",
-       []() { return StaticPrefs::zoom_stealth_screen_window_y(); }, 0},
-      {"zoom.stealth.screen.chrome_w",
-       []() { return StaticPrefs::zoom_stealth_screen_chrome_w(); }, 0},
-      {"zoom.stealth.screen.chrome_h",
-       []() { return StaticPrefs::zoom_stealth_screen_chrome_h(); }, 0},
+      // The window geometry, in DEVICE pixels since firefox-38 (B258, B261).
+      // Until then four CSS integers - window_x, window_y, chrome_w, chrome_h -
+      // added 2026-08-09 after screenX + outerWidth came to 1924 on a 1920
+      // screen. The group is still declared whole or not at all, for the same
+      // reason. Floors: a maximized window and a popup always have UI above
+      // their content, a work area narrower than 320 is a bug; the border and
+      // the popup position may be 0, so the sentinel is -1.
+      {"zoom.stealth.screen.frame_border",
+       []() { return StaticPrefs::zoom_stealth_screen_frame_border(); }, 0},
+      {"zoom.stealth.screen.maximized_ui",
+       []() { return StaticPrefs::zoom_stealth_screen_maximized_ui(); }, 1},
+      {"zoom.stealth.screen.popup_ui",
+       []() { return StaticPrefs::zoom_stealth_screen_popup_ui(); }, 1},
+      {"zoom.stealth.screen.popup_position",
+       []() { return StaticPrefs::zoom_stealth_screen_popup_position(); }, 0},
+      {"zoom.stealth.screen.avail_device_width",
+       []() { return StaticPrefs::zoom_stealth_screen_avail_device_width(); },
+       320},
+      {"zoom.stealth.screen.avail_device_height",
+       []() { return StaticPrefs::zoom_stealth_screen_avail_device_height(); },
+       240},
       // The CSS interaction media features, added 2026-08-09. Floor 1 rather
       // than 0: PointerCapabilities::None is a legal value of the enum and a
       // nonsensical value for a machine somebody is browsing from, so a zero
@@ -252,48 +258,61 @@ void StealthAssertDeclarationsComplete() {
   }
 }
 
-Maybe<CSSIntPoint> StealthDeclaredWindowOrigin() {
+Maybe<StealthWindowFrame> StealthDeclaredWindowFrame() {
   if (!StealthEngineActive()) {
     // Stock Firefox. Not an incomplete declaration, the absence of one.
     return Nothing();
   }
-  const int32_t x = StaticPrefs::zoom_stealth_screen_window_x();
-  const int32_t y = StaticPrefs::zoom_stealth_screen_window_y();
-  if (x < 0 || y < 0) {
+  const StealthWindowFrame frame{
+      StaticPrefs::zoom_stealth_screen_frame_border(),
+      StaticPrefs::zoom_stealth_screen_maximized_ui(),
+      StaticPrefs::zoom_stealth_screen_popup_ui(),
+      StaticPrefs::zoom_stealth_screen_popup_position()};
+  if (frame.mBorder < 0 || frame.mMaximizedUi < 1 || frame.mPopupUi < 1 ||
+      frame.mPopupPosition < 0) {
     // Unreachable in practice: the gate refuses at launch in the parent, so a
     // process that is serving pages has these. Kept as a refusal rather than a
     // fallback, because the day it becomes reachable the right behaviour is
-    // still to stop, not to answer with the machine's real window position.
+    // still to stop, not to answer with the machine's real window.
     StealthAssertDeclarationsComplete();
     return Nothing();
   }
-  return Some(CSSIntPoint(x, y));
+  return Some(frame);
 }
 
-Maybe<CSSIntPoint> StealthDeclaredContentOrigin() {
-  const Maybe<CSSIntPoint> window = StealthDeclaredWindowOrigin();
-  if (window.isNothing()) {
+Maybe<LayoutDeviceIntRect> StealthDeclaredMaximizedWindow() {
+  const Maybe<StealthWindowFrame> frame = StealthDeclaredWindowFrame();
+  if (frame.isNothing()) {
     return Nothing();
   }
-  const int32_t chromeW = StaticPrefs::zoom_stealth_screen_chrome_w();
-  const int32_t chromeH = StaticPrefs::zoom_stealth_screen_chrome_h();
-  if (chromeW < 0 || chromeH < 0) {
+  const int32_t w = StaticPrefs::zoom_stealth_screen_avail_device_width();
+  const int32_t h = StaticPrefs::zoom_stealth_screen_avail_device_height();
+  if (w < 320 || h < 240) {
     StealthAssertDeclarationsComplete();
     return Nothing();
   }
-  // chrome_w is the total across both sides; chrome_h is entirely above.
-  return Some(CSSIntPoint(window->x + chromeW / 2, window->y + chromeH));
+  const int32_t b = frame->mBorder;
+  return Some(LayoutDeviceIntRect(-b, -b, w + 2 * b, h + 2 * b));
 }
 
-Maybe<nsPoint> StealthDeclaredOriginShift(const nsPoint& aRealContentOrigin) {
-  const Maybe<CSSIntPoint> declared = StealthDeclaredContentOrigin();
-  if (declared.isNothing()) {
+Maybe<nsPoint> StealthDeclaredOriginShift(
+    const nsPoint& aRealContentOrigin,
+    const Maybe<LayoutDeviceIntPoint>& aPopupWindowOrigin,
+    int32_t aAppUnitsPerDevPixel) {
+  const Maybe<StealthWindowFrame> frame = StealthDeclaredWindowFrame();
+  if (frame.isNothing()) {
     return Nothing();
   }
-  const nsPoint declaredAppUnits(
-      CSSPixel::ToAppUnits(CSSCoord(float(declared->x))),
-      CSSPixel::ToAppUnits(CSSCoord(float(declared->y))));
-  return Some(declaredAppUnits - aRealContentOrigin);
+  // The maximized window's content starts at the screen's left edge, the UI
+  // height below its top; a popup's starts a border in and the popup UI down
+  // from wherever the popup really is.
+  const LayoutDeviceIntPoint declared =
+      aPopupWindowOrigin
+          ? *aPopupWindowOrigin +
+                LayoutDeviceIntPoint(frame->mBorder, frame->mPopupUi)
+          : LayoutDeviceIntPoint(0, frame->mMaximizedUi);
+  return Some(LayoutDevicePixel::ToAppUnits(declared, aAppUnitsPerDevPixel) -
+              aRealContentOrigin);
 }
 
 }  // namespace gfx

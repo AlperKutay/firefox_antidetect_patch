@@ -794,13 +794,18 @@ class nsGlobalWindowOuter final : public mozilla::dom::EventTarget,
                                    mozilla::ErrorResult& aError);
   nsRect GetInnerScreenRect();
 
-  // L'origine REALE del contenuto di primo livello, in app units: e'
-  // l'offset su schermo del root widget, cioe' esattamente cio' che
-  // mozInnerScreenX riportava prima di diventare una dichiarazione, ed e'
-  // la stessa quantita' che Event.cpp usa per lo scarto. Serve perche' il
-  // valore dichiarato appartiene al primo livello: un sottoframe deve
-  // sommare lo scarto al PROPRIO rettangolo, non sostituirlo.
-  nsPoint GetRealTopLevelContentOrigin();
+  // Lo scarto fra l'origine reale del contenuto di primo livello (l'offset su
+  // schermo del root widget, cio' che mozInnerScreenX riportava prima di
+  // diventare una dichiarazione) e quella dichiarata, in app units; Nothing()
+  // col motore spento. UNA funzione per mozInnerScreenX/Y e per gli eventi
+  // (Event.cpp): e' cosi' che screenX - clientX == mozInnerScreenX resta vero
+  // anche nei popup e negli iframe. Un sottoframe somma lo scarto al PROPRIO
+  // rettangolo, non lo sostituisce.
+  static mozilla::Maybe<nsPoint> StealthContentOriginShift(
+      nsPresContext* aPresContext);
+  // La finestra di primo livello di questo documento e' un popup (aperto con
+  // delle feature)? La dichiarazione della finestra dipende da questo.
+  bool IsInStealthPopup() const;
   static mozilla::Maybe<mozilla::CSSIntSize> GetRDMDeviceSize(
       const Document& aDocument);
 

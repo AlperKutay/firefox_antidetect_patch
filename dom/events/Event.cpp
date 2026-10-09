@@ -37,6 +37,7 @@
 #include "nsDeviceContext.h"
 #include "nsError.h"
 #include "nsGlobalWindowInner.h"
+#include "nsGlobalWindowOuter.h"
 #include "nsIContent.h"
 #include "nsIContentInlines.h"
 #include "nsIFrame.h"
@@ -717,12 +718,9 @@ Maybe<CSSDoublePoint> Event::GetScreenCoords(
   // secca in nsGlobalWindowOuter ha ricreato dentro gli iframe la contraddizione
   // che questo blocco toglie al primo livello - misurato il 2026-08-10.
   nsPoint originShift;
-  if (nsCOMPtr<nsIWidget> rootWidget = aPresContext->GetRootWidget()) {
-    const nsPoint real = LayoutDevicePixel::ToAppUnits(
-        rootWidget->WidgetToScreenOffset(), auPerDevPx);
-    if (const auto shift = gfx::StealthDeclaredOriginShift(real)) {
-      originShift = *shift;
-    }
+  if (const auto shift =
+          nsGlobalWindowOuter::StealthContentOriginShift(aPresContext)) {
+    originShift = *shift;
   }
 
   const CSSPoint pt = CSSPixel::FromAppUnits(
