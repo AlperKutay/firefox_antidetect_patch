@@ -785,6 +785,64 @@ export class PageHandler {
     this._isDragging = !!(answer && answer.live);
   }
 
+  /**
+   * Wait until the page's renderer has HANDLED mouse event `eventId`.
+   *
+   * ⛔ THE CONTRACT OF `Page.dispatchMouseEvent`, AND THE FORK HAD LOST IT. When
+   * the command answers, the event has happened in the page: its listeners have
+   * run, its hit test was made on the layout of that moment. Upstream kept this
+   * by awaiting the completion callback of `synthesizeMouseEvent`; this fork
+   * dispatches through `jugglerSendMouseEvent`, which has none, so the command
+   * answered when the event was HANDED TO THE WIDGET. A mouse event then waits
+   * in the content process - a press behind a coalesced move waits for the
+   * refresh tick - while the client's next call, on another channel, can run
+   * first. [B230], measured under load on Linux: a `mousedown` sent before a
+   * `scrollIntoView` was hit-tested after it, 39 px off, on the gap between the
+   * drag source and the drop zone, so the drag never started; and a script read
+   * sent after a double click saw two clicks out of three. A low-level probe:
+   * 3 reads in 300 before the press was handled. The element actions did not
+   * show it only because they ask `pointerLanded`, which waits for this same
+   * ack; the pointer primitives (Selenium's ActionChains, pyppeteer's Mouse,
+   * Playwright's page.mouse) asked nothing.
+   *
+   * The ack is the one [B217] added: PresShell notifies it AFTER handling the
+   * event, and `FrameTree.whenEventHit` resolves on it. Waiting here, once, puts
+   * every later call of every client behind the input, instead of each caller
+   * remembering to ask.
+   *
+   * ⛔ A DIALOG ENDS THE WAIT. A click that opens `alert()` runs the dialog
+   * inside its own handler, so the ack comes only once the dialog is closed -
+   * and closing it is the client's job, after this command has answered. A
+   * dialog already open means the content process is inside one: nothing it
+   * receives now is handled until it closes, so there is nothing to wait for.
+   *
+   * ⛔ BOUNDED, AND A BOUND THAT EXPIRES IS AN ERROR, not an answer: the event
+   * was sent and the page has not handled it, and saying "done" would bring the
+   * defect back silently. Five seconds, as the other waits on this ack.
+   */
+  async _awaitInputHandled(eventId) {
+    if (this._pageTarget.dialogs().length)
+      return;
+    const offs = [];
+    const dialogOpened = new Promise(resolve => {
+      offs.push(helper.on(this._pageTarget, PageTarget.Events.DialogOpened, resolve));
+    });
+    let timer;
+    const expired = new Promise(resolve => { timer = setTimeout(() => resolve('expired'), 5000); });
+    try {
+      const outcome = await Promise.race([
+        this._contentPage.send('awaitInputHandled', { eventId }),
+        dialogOpened,
+        expired,
+      ]);
+      if (outcome === 'expired')
+        throw new Error('the page did not handle mouse event ' + eventId + ' within 5 s');
+    } finally {
+      clearTimeout(timer);
+      helper.removeListeners(offs);
+    }
+  }
+
   async ['Page.dispatchTapEvent'](options) {
     return await this._pageTarget.activateAndRun(() =>
       this._contentPage.send('dispatchTapEvent', options));
@@ -831,6 +889,9 @@ export class PageHandler {
     // acks once it has handled it. Returned so that a caller can wait for
     // exactly that event before asking where it landed. [B217]
     let lastEventId = 0;
+    // False only for the move sent off the web content (below): the renderer of
+    // the page never handles it, so there is no ack to wait for.
+    let landsInPage = true;
     const sendEvents = async (types) => {
       if (typeof this._pageTarget._linkedBrowser.scrollRectIntoViewIfNeeded === 'function')
         this._pageTarget._linkedBrowser.scrollRectIntoViewIfNeeded(page.length(x), page.length(y), 0, 0);
@@ -871,6 +932,7 @@ export class PageHandler {
         // A special hack: if someone tries to do `mousemove` outside of
         // viewport coordinates, then move the mouse off from the Web Content.
         // This way we can eliminate all the hover effects.
+        landsInPage = false;
         lastEventId = win.windowUtils.jugglerSendMouseEvent(
           'mousemove',
           0 /* x */,
@@ -993,8 +1055,11 @@ export class PageHandler {
         return;
       }
     }, { muteNotificationsPopup: true });
-    if (lastEventId)
+    if (lastEventId) {
       this._lastMouseEventId = lastEventId;
+      if (landsInPage)
+        await this._awaitInputHandled(lastEventId);
+    }
     return { eventId: lastEventId };
   }
 

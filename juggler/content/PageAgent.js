@@ -174,6 +174,7 @@ export class PageAgent {
         dispatchKeyEvent: this._dispatchKeyEvent.bind(this),
         dispatchDragEvent: this._dispatchDragEvent.bind(this),
         isDragSessionLive: this._isDragSessionLive.bind(this),
+        awaitInputHandled: this._awaitInputHandled.bind(this),
         pointerLanded: this._pointerLanded.bind(this),
         dispatchTapEvent: this._dispatchTapEvent.bind(this),
         getContentQuads: this._getContentQuads.bind(this),
@@ -753,6 +754,15 @@ export class PageAgent {
    * the drag: both ride the same channel to this process, and input is not
    * delivered later than what was sent after it.
    */
+  /**
+   * Resolves once the renderer has handled mouse event `eventId`. The parent
+   * awaits it before `Page.dispatchMouseEvent` answers, and bounds it there,
+   * where a dialog that suspends this process can also end the wait. [B230]
+   */
+  async _awaitInputHandled({eventId}) {
+    await this._frameTree.whenEventHit(eventId);
+  }
+
   async _isDragSessionLive({afterEventId} = {}) {
     // Only after the renderer has handled the last move sent: a coalesced
     // `mousemove` that has not been dispatched yet cannot have started a drag,
