@@ -7174,6 +7174,13 @@ nsresult PresShell::HandleEvent(nsIFrame* aFrameForPresShell,
       case eMouseUp:
         type = "mouseup";
         break;
+      // [B230]: a right press sends `mousedown` and then `contextmenu`, and
+      // `Page.dispatchMouseEvent` answers once the LAST event it sent is
+      // handled. Without this case that last event was never acked, and every
+      // right click waited out its bound.
+      case eContextMenu:
+        type = "contextmenu";
+        break;
       default:
         return;
     }

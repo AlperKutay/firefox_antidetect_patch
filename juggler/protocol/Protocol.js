@@ -71,6 +71,13 @@ pageTypes.PointerLanding = {
   on: t.String,
 };
 
+// The element a pointer event is meant for, so that the dispatch can answer
+// whether the event landed on it. [B230]
+pageTypes.LandingTarget = {
+  frameId: t.String,
+  objectId: t.String,
+};
+
 pageTypes.Rect = {
   x: t.Number,
   y: t.Number,
@@ -838,19 +845,6 @@ const Page = {
         rect: t.Optional(pageTypes.Rect),
       },
     },
-    'pointerLanded': {
-      params: {
-        frameId: t.String,
-        objectId: t.String,
-        types: t.Array(t.String),
-        // The id `dispatchMouseEvent` returned for the last event sent: the
-        // answer waits for the renderer to have handled it.
-        afterEventId: t.Optional(t.Number),
-      },
-      returns: {
-        landings: t.Array(pageTypes.PointerLanding),
-      },
-    },
     'setInitScripts': {
       params: {
         scripts: t.Array(pageTypes.InitScript)
@@ -943,11 +937,18 @@ const Page = {
         modifiers: t.Number,
         clickCount: t.Optional(t.Number),
         buttons: t.Number,
+        // The element the event is meant for: the answer then says whether the
+        // event LANDED on it, judged when the page handled it.
+        landsOn: t.Optional(pageTypes.LandingTarget),
       },
+      // The command answers once the page has HANDLED the event (or a dialog
+      // it opened is showing), so a caller's next command runs after it.
+      // `landing` comes with `landsOn`, and is absent only when a dialog the
+      // event opened ended the wait - the dialog is the proof that it landed.
+      // It replaces `Page.pointerLanded`, a second command asked afterwards:
+      // by then a click that navigated had taken its element away. [B230]
       returns: {
-        // The renderer acks this id once it has handled the event; 0 when
-        // nothing was dispatched (a press outside the viewport, a drag).
-        eventId: t.Number,
+        landing: t.Optional(pageTypes.PointerLanding),
       },
     },
     'dispatchWheelEvent': {

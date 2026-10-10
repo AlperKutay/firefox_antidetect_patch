@@ -63,6 +63,10 @@ export class PageAgent {
     this._runtime = frameTree.runtime();
 
     this._workerData = new Map();
+    // Elements pointer events are meant for, resolved BEFORE the events are
+    // sent and read when the page has handled them (`_armLanding`). [B230]
+    this._armedLandings = new Map();
+    this._lastLandingToken = 0;
 
     const docShell = frameTree.mainFrame().docShell();
     this._docShell = docShell;
@@ -173,8 +177,8 @@ export class PageAgent {
         describeNode: this._describeNode.bind(this),
         dispatchKeyEvent: this._dispatchKeyEvent.bind(this),
         dispatchDragEvent: this._dispatchDragEvent.bind(this),
-        isDragSessionLive: this._isDragSessionLive.bind(this),
-        pointerLanded: this._pointerLanded.bind(this),
+        awaitInputHandled: this._awaitInputHandled.bind(this),
+        armLanding: this._armLanding.bind(this),
         dispatchTapEvent: this._dispatchTapEvent.bind(this),
         getContentQuads: this._getContentQuads.bind(this),
         insertText: this._insertText.bind(this),
@@ -737,79 +741,60 @@ export class PageAgent {
   }
 
   /**
-   * Is a drag session live RIGHT NOW? Asked by the parent at the release.
+   * Hold the element a pointer event is meant for, BEFORE the event is sent.
    *
-   * ⛔ WHY ASKING BEATS WATCHING, AT THIS ONE POINT. The parent learns about a
-   * drag by observing the `dragstart` we emit, which is cheap and needs no round
-   * trip - but observing can only ever be as fresh as the last thing that
-   * arrived. At the release there is no later event to catch up on, so a miss
-   * there is final: the release goes out as a plain `mouseup`, the drop never
-   * happens, and the session is not even closed. That is the case of a travel
-   * made of ONE movement, where the drag is born by the last event of the
-   * gesture. [B213]
-   *
-   * So at that one point the parent stops inferring and asks the side that
-   * knows. The answer is ordered behind the mouse event that may have started
-   * the drag: both ride the same channel to this process, and input is not
-   * delivered later than what was sent after it.
+   * ⛔ RESOLVED NOW, NOT WHEN THE ANSWER IS WANTED. The event's own handler may
+   * take the element away - a button that hides on click, a submit that
+   * navigates - and a lookup made afterwards then finds nothing, which is how
+   * `Page.pointerLanded` failed: asked after the dispatch answered, it met a
+   * document a form submission had already replaced ("Cannot find object").
+   * Held here, the node is compared with where the event landed whatever the
+   * page did next. [B230]
    */
-  async _isDragSessionLive({afterEventId} = {}) {
-    // Only after the renderer has handled the last move sent: a coalesced
-    // `mousemove` that has not been dispatched yet cannot have started a drag,
-    // and asking before it is asking about a moment that has not happened.
-    // Bounded like `_pointerLanded`; a bound that expires answers "no
-    // session", which is what is true at that moment.
-    if (afterEventId) {
-      await Promise.race([
-        this._frameTree.whenEventHit(afterEventId),
-        new Promise(resolve => setTimeout(resolve, 5000)),
-      ]);
-    }
-    return { live: !!this._getCurrentDragSession() };
-  }
-
-  /**
-   * Did the last pointer event of each given type land on this element?
-   *
-   * ⛔ THE ANSWER THAT LETS AN ACTION STOP LYING. The driver checks the hit
-   * target BEFORE it acts and, deliberately, never re-reads the geometry after:
-   * a read after the event cannot distinguish a miss from a hit whose target
-   * moved by its own effect (`_act_on_target` in the wrapper says why). What it
-   * can be told instead is where the event itself landed, recorded at dispatch
-   * by `FrameTree`. A text node counts through its parent; anything inside the
-   * element counts as the element, which is also how the DOM `click` composes
-   * from `mousedown` and `mouseup`.
-   *
-   * Ordered behind the events it is about, for the same reason as
-   * `_isDragSessionLive`: the question rides the same channel as the input.
-   * [B217]
-   */
-  async _pointerLanded({frameId, objectId, types, afterEventId}) {
+  _armLanding({frameId, objectId}) {
     const frame = this._frameTree.frame(frameId);
     if (!frame)
       throw new Error('Failed to find frame with id = ' + frameId);
     const node = frame.unsafeObject(objectId);
     if (!node)
       throw new Error('Object not found for id = ' + objectId);
-    // ⛔ WAIT FOR THE RENDERER'S ACK OF THE LAST EVENT SENT, OR THE ANSWER IS
-    // ABOUT THE WRONG MOMENT. The question and the input do not share a
-    // queue: a `mousemove` is coalesced and dispatched at the next refresh
-    // tick, and this method ran first two times out of four, answering "no
-    // mousemove has reached the page" while the page had already seen the
-    // `mouseover` of that very move. The ack is exact; a wait on frames would
-    // be a guess. Bounded, and a bound that expires is reported as what it is.
-    if (afterEventId) {
-      const acked = await Promise.race([
-        this._frameTree.whenEventHit(afterEventId).then(() => true),
-        new Promise(resolve => setTimeout(() => resolve(false), 5000)),
-      ]);
-      if (!acked) {
-        return { landings: types.map(type => ({
-          type, landed: false, seen: 0,
-          on: 'event ' + afterEventId + ' was never acked by the renderer',
-        })) };
-      }
-    }
+    const token = ++this._lastLandingToken;
+    this._armedLandings.set(token, node);
+    return { token };
+  }
+
+  /**
+   * Resolves once the renderer has handled mouse event `eventId`; with a
+   * `landingToken`, also says whether the event of `type` LANDED on the
+   * element armed under it. The parent awaits this before
+   * `Page.dispatchMouseEvent` answers, and bounds it there, where a dialog
+   * that suspends this process can also end the wait. [B230]
+   *
+   * ⛔ THE VERDICT IS READ IN THE SAME TURN AS THE ACK. The record of where the
+   * event landed is written by `FrameTree` while the page handles it; reading
+   * it here, before anything else runs in this process, is what makes it
+   * about THIS event.
+   */
+  async _awaitInputHandled({eventId, type, landingToken}) {
+    const node = landingToken ? this._armedLandings.get(landingToken) : null;
+    this._armedLandings.delete(landingToken);
+    await this._frameTree.whenEventHit(eventId);
+    return node ? { landing: this._landingOn(node, type) } : {};
+  }
+
+  /**
+   * Did the last pointer event of `type` land on `node`?
+   *
+   * ⛔ THE ANSWER THAT LETS AN ACTION STOP LYING. The driver checks the hit
+   * target BEFORE it acts and, deliberately, never re-reads the geometry after:
+   * a read after the event cannot distinguish a miss from a hit whose target
+   * moved by its own effect. What it can be told instead is where the event
+   * itself landed, recorded at dispatch by `FrameTree`. A text node counts
+   * through its parent; anything inside the element counts as the element,
+   * which is also how the DOM `click` composes from `mousedown` and `mouseup`.
+   * [B217]
+   */
+  _landingOn(node, type) {
     const describe = (t) => {
       if (!t)
         return 'nothing';
@@ -821,26 +806,18 @@ export class PageAgent {
       const cls = t.classList && t.classList.length ? '.' + [...t.classList].join('.') : '';
       return t.tagName.toLowerCase() + id + cls;
     };
-    const document = frame.domWindow().document;
-    const landings = [];
-    for (const type of types) {
-      const landing = this._frameTree.pointerLanding(type);
-      if (!landing) {
-        landings.push({ type, landed: false, seen: 0, on: 'no ' + type + ' has reached the page' });
-        continue;
-      }
-      if (landing.document !== document) {
-        landings.push({ type, landed: false, seen: landing.seen,
-                        on: 'a previous document; none has reached this one' });
-        continue;
-      }
-      const target = landing.target;
-      const t = target && target.nodeType === 3 ? target.parentNode : target;
-      const landed = !!t && (t === node || node.contains(t));
-      landings.push({ type, landed, seen: landing.seen, on: landed ? '' : describe(t) });
-    }
-    return { landings };
+    const landing = this._frameTree.pointerLanding(type);
+    if (!landing)
+      return { type, landed: false, seen: 0, on: 'no ' + type + ' has reached the page' };
+    if (landing.document !== node.ownerDocument)
+      return { type, landed: false, seen: landing.seen,
+               on: 'a previous document; none has reached this one' };
+    const target = landing.target;
+    const t = target && target.nodeType === 3 ? target.parentNode : target;
+    const landed = !!t && (t === node || node.contains(t));
+    return { type, landed, seen: landing.seen, on: landed ? '' : describe(t) };
   }
+
 
   async _dispatchDragEvent({type, x, y, modifiers}) {
     const session = this._getCurrentDragSession();
