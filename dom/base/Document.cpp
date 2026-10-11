@@ -521,6 +521,9 @@ static LinkedList<Document>& AllDocumentsList() {
 
 static LazyLogModule gDocumentLeakPRLog("DocumentLeak");
 static LazyLogModule gCspPRLog("CSP");
+// B149 research: the same module as nsFocusManager's, so MOZ_LOG=Focus:5
+// shows who suppresses event handling next to the focus decisions.
+static LazyLogModule gB149DocLog("Focus");
 LazyLogModule gUserInteractionPRLog("UserInteraction");
 
 static nsresult GetHttpChannelHelper(nsIChannel* aChannel,
@@ -13001,6 +13004,11 @@ void Document::GetReadyState(nsAString& aReadyState) const {
 
 void Document::SuppressEventHandling(uint32_t aIncrease) {
   mEventsSuppressed += aIncrease;
+  MOZ_LOG(gB149DocLog, LogLevel::Debug,
+          ("B149 suppress doc=%p bc=%" PRIx64 " depth=%u (+%u) uri=%s", this,
+           GetBrowsingContext() ? GetBrowsingContext()->Id() : 0,
+           mEventsSuppressed, aIncrease,
+           mDocumentURI ? mDocumentURI->GetSpecOrDefault().get() : ""));
   if (mEventsSuppressed == aIncrease) {
     if (WindowGlobalChild* wgc = GetWindowGlobalChild()) {
       wgc->BlockBFCacheFor(BFCacheStatus::EVENT_HANDLING_SUPPRESSED);
@@ -13411,6 +13419,11 @@ static void GetAndUnsuppressSubDocuments(
 void Document::UnsuppressEventHandlingAndFireEvents(bool aFireEvents) {
   nsTArray<nsCOMPtr<Document>> documents;
   GetAndUnsuppressSubDocuments(*this, documents);
+  for (nsCOMPtr<Document>& doc : documents) {
+    MOZ_LOG(gB149DocLog, LogLevel::Debug,
+            ("B149 unsuppress doc=%p depth=%u fire=%d", doc.get(),
+             doc->EventHandlingSuppressed(), aFireEvents));
+  }
 
   for (nsCOMPtr<Document>& doc : documents) {
     if (!doc->EventHandlingSuppressed()) {

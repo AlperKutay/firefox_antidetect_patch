@@ -13,6 +13,8 @@
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/dom/AutoSuppressEventHandlingAndSuspend.h"
+#include "mozilla/Logging.h"
+static mozilla::LazyLogModule gB149DtLog("Focus");
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/ContentChild.h"
 #include "mozilla/dom/DOMStringList.h"
@@ -369,6 +371,7 @@ DataTransfer::WaitForClipboardDataSnapshotAndCreate(
     return nullptr;
   }
 
+  MOZ_LOG(gB149DtLog, mozilla::LogLevel::Debug, ("B149 who=DataTransfer"));
   AutoSuppressEventHandlingAndSuspend autoSuppress(bc->Group());
   if (!SpinEventLoopUntil(
           "DataTransfer::WaitForClipboardDataSnapshotAndCreate"_ns,

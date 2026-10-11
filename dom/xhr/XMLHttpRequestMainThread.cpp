@@ -112,6 +112,7 @@
 #endif
 
 extern mozilla::LazyLogModule gXMLHttpRequestLog;
+static mozilla::LazyLogModule gB149XhrLog("Focus");
 
 using namespace mozilla::net;
 
@@ -3237,6 +3238,7 @@ void XMLHttpRequestMainThread::SendInternal(const BodyExtractorBase* aBody,
       ResumeEventDispatching();
     });
     Maybe<AutoSuppressEventHandling> autoSuppress;
+    MOZ_LOG(gB149XhrLog, LogLevel::Debug, ("B149 who=SyncXHR"));
 
     mFlagSyncLooping = true;
 

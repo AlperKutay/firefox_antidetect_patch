@@ -317,6 +317,7 @@ static inline nsGlobalWindowInner* GetCurrentInnerWindowInternal(
   PR_END_MACRO
 
 static LazyLogModule gDOMLeakPRLogOuter("DOMLeakOuter");
+static LazyLogModule gB149WinLog("Focus");
 extern LazyLogModule gPageCacheLog;
 
 #ifdef DEBUG
@@ -6404,6 +6405,7 @@ nsGlobalWindowOuter* nsGlobalWindowOuter::EnterModalState() {
   }
 
   if (topWin->mModalStateDepth == 0) {
+    MOZ_LOG(gB149WinLog, LogLevel::Debug, ("B149 who=EnterModalState"));
     topWin->SuppressEventHandling();
 
     if (nsGlobalWindowInner* inner = GetCurrentInnerWindowInternal(topWin)) {

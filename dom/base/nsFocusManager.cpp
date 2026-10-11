@@ -1410,9 +1410,20 @@ void nsFocusManager::FireDelayedEvents(Document* aDocument) {
         // If the document was navigated away from or is defunct, don't bother
         // firing events on it. Note the symmetry between this condition and
         // the similar one in Document.cpp:FireOrClearDelayedEvents.
+        LOGFOCUS(("B149 dropped delayed %s doc=%p: not the current inner",
+                  mDelayedBlurFocusEvents[i].mEventMessage == eBlur ? "blur"
+                                                                     : "focus",
+                  aDocument));
         mDelayedBlurFocusEvents.RemoveElementAt(i);
         --i;
+      } else if (aDocument->EventHandlingSuppressed()) {
+        LOGFOCUS(("B149 kept delayed event doc=%p depth=%u", aDocument,
+                  aDocument->EventHandlingSuppressed()));
       } else if (!aDocument->EventHandlingSuppressed()) {
+        LOGFOCUS(("B149 firing delayed %s doc=%p",
+                  mDelayedBlurFocusEvents[i].mEventMessage == eBlur ? "blur"
+                                                                     : "focus",
+                  aDocument));
         EventMessage message = mDelayedBlurFocusEvents[i].mEventMessage;
         nsCOMPtr<EventTarget> target = mDelayedBlurFocusEvents[i].mTarget;
         RefPtr<PresShell> presShell = mDelayedBlurFocusEvents[i].mPresShell;
@@ -3050,6 +3061,10 @@ void nsFocusManager::SendFocusOrBlurEvent(EventMessage aEventMessage,
 
     mDelayedBlurFocusEvents.EmplaceBack(aEventMessage, aPresShell, aDocument,
                                         aTarget, aRelatedTarget);
+    LOGFOCUS(("B149 queued %s doc=%p depth=%u queue=%zu",
+              aEventMessage == eBlur ? "blur" : "focus", aDocument,
+              aDocument->EventHandlingSuppressed(),
+              mDelayedBlurFocusEvents.Length()));
     return;
   }
 

@@ -49,6 +49,8 @@
 #include "mozilla/WebBrowserPersistDocumentChild.h"
 #include "mozilla/devtools/HeapSnapshotTempFileHelperChild.h"
 #include "mozilla/dom/AutoSuppressEventHandlingAndSuspend.h"
+#include "mozilla/Logging.h"
+static mozilla::LazyLogModule gB149ChildLog("Focus");
 #include "mozilla/dom/BlobImpl.h"
 #include "mozilla/dom/BrowserBridgeHost.h"
 #include "mozilla/dom/BrowsingContext.h"
@@ -1332,6 +1334,9 @@ nsresult ContentChild::ProvideWindowCommon(
     // was active will be dispatched asynchronously from a runnable dispatched
     // to the main event loop after this function returns, not immediately when
     // we leave this scope.
+    MOZ_LOG(gB149ChildLog, LogLevel::Debug,
+            ("B149 who=ProvideWindowCommon group=%" PRIx64,
+             browsingContext->Group()->Id()));
     AutoSuppressEventHandlingAndSuspend seh(browsingContext->Group());
 
     AutoNoJSAPI nojsapi;

@@ -154,6 +154,7 @@ using namespace mozilla::widget;
 using namespace mozilla::gfx;
 
 static LazyLogModule sApzZoomToFocusedInputLog("apz.zoomtofocusedinput");
+static LazyLogModule gB149UtilsLog("Focus");
 #define APZZTFI_LOG(...) \
   MOZ_LOG(sApzZoomToFocusedInputLog, LogLevel::Debug, (__VA_ARGS__))
 
@@ -1669,6 +1670,8 @@ nsDOMWindowUtils::SuppressEventHandling(bool aSuppress) {
   NS_ENSURE_STATE(window);
 
   if (aSuppress) {
+    MOZ_LOG(gB149UtilsLog, mozilla::LogLevel::Debug,
+            ("B149 who=nsDOMWindowUtils"));
     window->SuppressEventHandling();
   } else {
     window->UnsuppressEventHandling();
