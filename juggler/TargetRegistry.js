@@ -4,6 +4,7 @@
 
 const {Helper} = ChromeUtils.importESModule('chrome://juggler/content/Helper.js');
 const {StealthCursor} = ChromeUtils.importESModule('chrome://juggler/content/StealthCursor.js');
+const {newProxyInfoFor, proxyForHost} = ChromeUtils.importESModule('chrome://juggler/content/SessionRoute.js');
 const {Preferences} = ChromeUtils.importESModule("resource://gre/modules/Preferences.sys.mjs");
 const {ContextualIdentityService} = ChromeUtils.importESModule("resource://gre/modules/ContextualIdentityService.sys.mjs");
 const {NetUtil} = ChromeUtils.importESModule('resource://gre/modules/NetUtil.sys.mjs');
@@ -123,67 +124,6 @@ const screencastService = (() => {
     return null;
   }
 })();
-
-/**
- * The proxy types whose credentials belong INSIDE the nsIProxyInfo.
- *
- * ⛔ THIS IS NOT A STYLE CHOICE, IT IS WHAT GECKO IMPLEMENTS, and reading it as
- * one is what took HTTP proxies out for seven releases.
- * `nsProtocolProxyService::NewProxyInfoWithAuth`
- * (netwerk/base/nsProtocolProxyService.cpp) refuses outright:
- *
- *     // We have only implemented username/password for SOCKS proxies.
- *     if ((!aUsername.IsEmpty() || !aPassword.IsEmpty()) &&
- *         !aType.LowerCaseEqualsASCII(kProxyType_SOCKS) &&
- *         !aType.LowerCaseEqualsASCII(kProxyType_SOCKS4)) {
- *       return NS_ERROR_NOT_IMPLEMENTED;
- *     }
- *
- * The two families are not two spellings of one idea. SOCKS authenticates
- * inside its own handshake (RFC 1929), so the credentials have to travel with
- * the endpoint and there is nowhere else to put them. HTTP authenticates with a
- * 407 challenge (RFC 7235), which arrives on the channel and is answered by
- * `promptAuth` in NetworkObserver.js, where the AUTH_PROXY branch reads these
- * same credentials back out of this registry. So handing HTTP credentials to
- * the endpoint is not merely unsupported: it is the wrong mechanism, and the
- * right one was already wired and already working.
- */
-const PROXY_TYPES_THAT_CARRY_THEIR_OWN_CREDENTIALS = new Set(['socks', 'socks4']);
-
-const UINT32_MAX = Math.pow(2, 32) - 1;
-
-/**
- * ONE expression of how a stored proxy record becomes an nsIProxyInfo.
- *
- * It is a function rather than a line inside the channel filter because two
- * callers need the same answer and only one of them used to ask. The filter
- * built the proxy info per channel; nothing built it when the proxy was SET. A
- * proxy this engine cannot express therefore reached the filter, threw there,
- * and the filter fell on to hand necko the DEFAULT proxy info, which is DIRECT.
- * The page then left over the host's own address, with no error raised
- * anywhere, which is the precise opposite of what asking for a proxy means.
- *
- * Throwing is the point of it. `setBrowserProxy` and `BrowserContext.setProxy`
- * call this while the command is still on the wire, so a proxy that cannot be
- * expressed refuses the command that asked for it instead of turning into a
- * silent leak one navigation later.
- */
-export function newProxyInfoFor(proxy) {
-  const carriesOwnCredentials = PROXY_TYPES_THAT_CARRY_THEIR_OWN_CREDENTIALS.has(proxy.type);
-  const protocolProxyService = Cc['@mozilla.org/network/protocol-proxy-service;1'].getService();
-  return protocolProxyService.newProxyInfoWithAuth(
-      proxy.type,
-      proxy.host,
-      proxy.port,
-      carriesOwnCredentials ? (proxy.username || '') : '',
-      carriesOwnCredentials ? (proxy.password || '') : '',
-      '', /* aProxyAuthorizationHeader */
-      '', /* aConnectionIsolationKey */
-      Ci.nsIProxyInfo.TRANSPARENT_PROXY_RESOLVES_HOST, /* aFlags */
-      UINT32_MAX, /* aFailoverTimeout */
-      null, /* failover proxy */
-  );
-}
 
 export class TargetRegistry {
   static instance() {
@@ -418,12 +358,32 @@ export class TargetRegistry {
 
   getProxyInfo(channel) {
     const originAttributes = channel.loadInfo && channel.loadInfo.originAttributes;
-    const browserContext = originAttributes ? this.browserContextForUserContextId(originAttributes.userContextId) : null;
+    return this.proxyFor(channel.URI.host, originAttributes ? originAttributes.userContextId : undefined);
+  }
+
+  /**
+   * The proxy record a request to `host` leaves by, or null for the default
+   * road. ONE lookup, asked by two callers: the channel filter, through
+   * `getProxyInfo`, for every request of the session, and TelemetrySend for
+   * the pingsender background task it starts at exit (B266), which must leave
+   * by the road the browser's own request to that host would have taken. A
+   * request with no origin attributes has no context and takes the browser's
+   * proxy, as it always did.
+   */
+  proxyFor(host, userContextId) {
+    return proxyForHost(this.proxyRecordFor(userContextId), host);
+  }
+
+  /**
+   * The proxy record that governs a context, bypass list included, or null.
+   * TelemetrySend hands THIS to the pingsender background task rather than an
+   * answer for one host, so the task asks `proxyForHost` itself for whatever
+   * it connects to - the ping, and anything the ping's TLS fetches on the way.
+   */
+  proxyRecordFor(userContextId) {
+    const browserContext = userContextId === undefined ? null : this.browserContextForUserContextId(userContextId);
     // Prefer context proxy and fallback to browser-level proxy.
-    const proxyInfo = (browserContext && browserContext._proxy) || this._browserProxy;
-    if (!proxyInfo || proxyInfo.bypass.some(domainSuffix => channel.URI.host.endsWith(domainSuffix)))
-      return null;
-    return proxyInfo;
+    return (browserContext && browserContext._proxy) || this._browserProxy || null;
   }
 
   defaultContext() {
