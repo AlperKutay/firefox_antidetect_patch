@@ -59,6 +59,7 @@
 #include "mozilla/Services.h"
 #include "mozilla/SpinEventLoopUntil.h"
 #include "mozilla/StaticPrefs_browser.h"
+#include "mozilla/StaticPrefs_zoom.h"
 #include "mozilla/dom/BarProps.h"
 #include "mozilla/dom/DOMRect.h"
 #include "mozilla/dom/Element.h"
@@ -2838,6 +2839,20 @@ void AppWindow::WindowActivated() {
 }
 
 void AppWindow::WindowDeactivated() {
+  // ⛔ zoom.stealth.focus.ignore_os_deactivation (B149): the window keeps its
+  // activation when the SYSTEM takes it away - another application, another
+  // session's window on the same display - and loses it only to this
+  // session's own windows, whose activation arrives as WindowActivated and
+  // lowers the window it replaces inside nsFocusManager::WindowRaised, with
+  // the same blur a page sees in any Firefox. Measured: a second visible
+  // session on one display took the focus of the first 4 times in 4, and a
+  // window opened on the host's desktop 6 in 6, so a page read
+  // document.hasFocus() false while nothing in its own session had moved.
+  // focusmanager.testmode stops that too but also emulates every raise, and
+  // a page can tell: hasFocus() turns false with no blur event (3 in 3).
+  if (StaticPrefs::zoom_stealth_focus_ignore_os_deactivation()) {
+    return;
+  }
   if (mDocShell) {
     if (nsCOMPtr<nsPIDOMWindowOuter> window = mDocShell->GetWindow()) {
       if (RefPtr<nsFocusManager> fm = nsFocusManager::GetFocusManager()) {
