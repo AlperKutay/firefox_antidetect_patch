@@ -20405,6 +20405,17 @@
   value: true
   mirror: always
 
+# B149. When true, a window does not give up its activation because the SYSTEM
+# took it (AppWindow::WindowDeactivated): another application or another
+# session's window on the same display. It still gives it up to this session's
+# own windows, whose activation lowers it inside nsFocusManager::WindowRaised.
+# Declared by invisible_core; `false` keeps upstream behaviour for a build
+# launched without it.
+- name: zoom.stealth.focus.ignore_os_deactivation
+  type: RelaxedAtomicBool
+  value: false
+  mirror: always
+
 # The declared screen colour depth. Without it nsScreen::PixelDepth returns
 # nsDeviceContext::GetDepth(), i.e. the REAL panel. The field-by-field audit
 # (19-field-declaration-audit.md) caught it only because it asks for proof
