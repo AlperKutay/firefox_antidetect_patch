@@ -68,13 +68,11 @@ export function initialize(browsingContext, docShell) {
   //
   // Misurato prima di toglierli, per non fidarsi del solo sorgente: su tre
   // schede il fuoco resta UNO, come in un browser vero, sia con sia senza.
-  // Stealth: keep BFCache enabled by default so pageshow event.persisted
-  // behaves like a real user. Set zoom.stealth.juggler.disallow_bfcache=true
-  // to restore Juggler's original behavior (needed for tests that expect
-  // fresh page state on back/forward navigation).
-  let disallowBFCache = false;
-  try { disallowBFCache = Services.prefs.getBoolPref("zoom.stealth.juggler.disallow_bfcache", false); } catch(e) {}
-  if (disallowBFCache) docShell.disallowBFCache = true;
+  // STEALTHFOX: BFCache stays enabled, as for a real user, so
+  // pageshow's event.persisted behaves like one. Upstream Juggler disables it
+  // per docshell; the knob that was here to restore that
+  // (zoom.stealth.juggler.disallow_bfcache) set an attribute nothing read, so
+  // it never did anything, and it is gone with the attribute.
   data.frameTree = new FrameTree(browsingContext);
   for (const [name, value] of Object.entries(contextCrossProcessCookie.settings)) {
     if (value !== undefined)
