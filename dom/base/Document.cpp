@@ -3899,6 +3899,13 @@ nsresult Document::InitCSP(nsIChannel* aChannel) {
     return rv;
   }
 
+  // The context above stays even when the automation bypasses the page's
+  // policies: history entries and a later <meta> expect one. What is skipped
+  // is every policy the page itself sends.
+  if (CSP_IsBypassedFor(*this)) {
+    return NS_OK;
+  }
+
   nsAutoCString tCspHeaderValue, tCspROHeaderValue;
 
   nsCOMPtr<nsIHttpChannel> httpChannel;
