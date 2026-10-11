@@ -82,6 +82,12 @@ const uint32_t kRetryDelayMs = 1000;
 // The age is checked more often than it is allowed to grow, or a tick that
 // lands just short of the age lets it run to two ticks: measured with one
 // constant for both, 6 frames in 4 s where 16 were meant.
+//
+// And the age is never shorter than the period the caller asked for (see
+// HeartbeatAgeFor). With a fixed 250 ms every rate under 4 fps was filled up
+// to about 4: asking for 2 delivered 11 frames in 3 s on CI, the ordinary
+// half-second gap between two captured frames being taken for silence. A
+// repetition must answer a capture that went quiet, never the rate itself.
 const uint32_t kHeartbeatMs = 250;
 const uint32_t kHeartbeatTickMs = 100;
 
@@ -141,7 +147,17 @@ class nsScreencastService::Session final
         mViewportHeight(aViewportHeight),
         mMargin(aMargin),
         mQuality(aQuality),
-        mFps(aFps) {}
+        mFps(aFps),
+        mHeartbeatAge(HeartbeatAgeFor(aFps)) {}
+
+  // The silence after which the last frame is repeated: kHeartbeatMs, or the
+  // period of the requested rate when that is longer, so a repetition never
+  // adds a frame the rate itself would not have. aFps is never 0: Start
+  // refuses it.
+  static TimeDuration HeartbeatAgeFor(uint32_t aFps) {
+    return TimeDuration::FromMilliseconds(
+        std::max(double(kHeartbeatMs), 1000.0 / double(aFps)));
+  }
 
   nsIWidget* Widget() const { return mWidget; }
 
@@ -405,8 +421,7 @@ class nsScreencastService::Session final
       return;
     }
     if (!mLastFrame.IsEmpty() && mClient && mFramesInFlight.load() == 0 &&
-        TimeStamp::Now() - mLastDelivered >
-            TimeDuration::FromMilliseconds(double(kHeartbeatMs))) {
+        TimeStamp::Now() - mLastDelivered > mHeartbeatAge) {
       mFramesInFlight.fetch_add(1);
       Deliver();
     }
@@ -439,6 +454,7 @@ class nsScreencastService::Session final
   const gfx::IntMargin mMargin;
   const uint32_t mQuality;
   const uint32_t mFps;
+  const TimeDuration mHeartbeatAge;
   std::atomic<bool> mStopped{false};
   std::atomic<uint32_t> mFramesInFlight{0};
 };
