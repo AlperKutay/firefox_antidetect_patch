@@ -20404,6 +20404,18 @@
   value: false
   mirror: always
 
+# B149, rule 7-ter. Whether a toplevel X11 window that another window FULLY
+# covers is treated as occluded, which makes its pages `hidden` and inactive
+# (rAF and timers throttled, enumerateDevices waiting). Windows has the same
+# behaviour behind widget.windows.window_occlusion_tracking.enabled, which
+# invisible_core turns off; this is the Linux side of the same declaration,
+# emitted by the core from the same value. `true` keeps upstream behaviour for
+# a build launched without invisible_core.
+- name: zoom.stealth.widget.occlusion_tracking.enabled
+  type: RelaxedAtomicBool
+  value: true
+  mirror: always
+
 # The declared screen colour depth. Without it nsScreen::PixelDepth returns
 # nsDeviceContext::GetDepth(), i.e. the REAL panel. The field-by-field audit
 # (19-field-declaration-audit.md) caught it only because it asks for proof
