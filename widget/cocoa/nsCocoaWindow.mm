@@ -80,6 +80,7 @@
 #include "mozilla/StaticPrefs_general.h"
 #include "mozilla/StaticPrefs_ui.h"
 #include "mozilla/StaticPrefs_widget.h"
+#include "mozilla/StaticPrefs_zoom.h"
 #include "mozilla/WritingModes.h"
 #include "mozilla/layers/CompositorBridgeChild.h"
 #include "mozilla/widget/Screen.h"
@@ -5383,6 +5384,10 @@ void nsCocoaWindow::Show(bool aState) {
         mIgnoreOcclusionCount++;
       }
     }
+    // STEALTHFOX_CLOAK_HOOK v2: a popup is not a window a page lives in.
+    if (mWindowType == WindowType::TopLevel && StealthOwnsActivation()) {
+      StealthActivateWindow();
+    }
   } else {
     // roll up any popups if a top-level window is going away
     if (IsTopLevelWidget()) {
@@ -6776,6 +6781,12 @@ void nsCocoaWindow::SetFocus(Raise aRaise,
       [mWindow deminiaturize:nil];
     }
     [mWindow makeKeyAndOrderFront:nil];
+    // STEALTHFOX_CLOAK_HOOK v2: the raise makes no window key while the
+    // application is inactive, so it is delivered here (a session switching
+    // between two of its own windows).
+    if (mWindowType == WindowType::TopLevel && StealthOwnsActivation()) {
+      StealthActivateWindow();
+    }
   }
 }
 
@@ -7241,6 +7252,33 @@ void nsCocoaWindow::CocoaSendToplevelDeactivateEvents() {
   if (mWidgetListener) {
     mWidgetListener->WindowDeactivated();
   }
+}
+
+// STEALTHFOX_CLOAK_HOOK v2: an application started in the background is not
+// made active by macOS, and a cloaked one must not be (that would take the
+// user's keyboard), so its window never becomes key and Gecko never hears
+// WindowActivated: document.hasFocus() stays false and enumerateDevices()
+// waits forever for a focused window. Windows and Linux activate a new
+// session's window and zoom.stealth.focus.ignore_os_deactivation keeps it
+// active; this is that activation. The reset first lets a re-raise be
+// delivered again; with that pref it is a no-op in AppWindow.
+bool nsCocoaWindow::StealthOwnsActivation() const {
+  return mStealthCloaked ||
+         StaticPrefs::zoom_stealth_focus_ignore_os_deactivation();
+}
+
+void nsCocoaWindow::StealthActivateWindow() {
+  NS_OBJC_BEGIN_TRY_IGNORE_BLOCK;
+
+  id delegate = mWindow.delegate;
+  if (!delegate || ![delegate isKindOfClass:[WindowDelegate class]]) {
+    return;
+  }
+  WindowDelegate* windowDelegate = (WindowDelegate*)delegate;
+  [windowDelegate sendToplevelDeactivateEvents];
+  [windowDelegate sendToplevelActivateEvents];
+
+  NS_OBJC_END_TRY_IGNORE_BLOCK;
 }
 
 void nsCocoaWindow::CocoaWindowDidResize() {

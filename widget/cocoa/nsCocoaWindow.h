@@ -483,6 +483,9 @@ class nsCocoaWindow final : public nsIWidget {
   void CocoaWindowDidResize();
   void CocoaSendToplevelActivateEvents();
   void CocoaSendToplevelDeactivateEvents();
+  // STEALTHFOX_CLOAK_HOOK v2: see the definition.
+  bool StealthOwnsActivation() const;
+  void StealthActivateWindow();
 
   enum class TransitionType {
     Windowed,
