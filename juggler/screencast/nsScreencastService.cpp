@@ -93,8 +93,9 @@ const uint32_t kHeartbeatTickMs = 100;
 
 StaticRefPtr<nsScreencastService> gScreencastService;
 
+// Atomic: every session creates its modules on its own control thread.
 int32_t NextModuleId() {
-  static int32_t sModuleId = 0;
+  static std::atomic<int32_t> sModuleId{0};
   return ++sModuleId;
 }
 
@@ -125,21 +126,44 @@ nsresult GenerateUid(nsString& aUid) {
 // client. Nothing here touches the content process or the page.
 //
 // The module is replaced when it ends on its own, and the last frame is
-// repeated while the module is quiet: the two constants above say why. Both
-// happen on the main thread, where the module is created and stopped.
+// repeated while the module is quiet: the two constants above say why. The
+// repetition happens on the main thread; the replacement on the control
+// thread, below.
+//
+// ⛔ THE MODULE LIVES ON THE SESSION'S OWN CONTROL THREAD, NEVER ON THE MAIN
+// THREAD. The window capturer reads the window with PrintWindow, which sends
+// the window a message and waits for the thread that owns it to answer: the
+// main thread, because the window captured is our own. StopCapture waits for
+// the capture thread with a SyncRunnable, which answers no message while it
+// waits. Both called on the main thread, they waited for each other forever
+// and Juggler answered nothing more (B277). Measured with four browsers
+// starting and stopping screencasts on the hidden desktop: the main thread
+// parked in a condition variable under DesktopCaptureImpl::StopCapture and the
+// DesktopCapture thread in NtUserPrintWindow, both stacks unchanged, three
+// runs out of three (two on firefox-44, one on firefox-43), each within the
+// first fifteen stops. Firefox's own window sharing drives the module from
+// CamerasParent's "VideoCapture" thread, never from the main thread.
+//
+// ⛔ AND THE MAIN THREAD NEVER WAITS FOR THE CONTROL THREAD, NOT EVEN TO
+// START. StartCapture asks the main thread for its X11 options with a
+// SyncRunnable (CreateDesktopCaptureOptions, "help avoid an X11 deadlock",
+// bug 1456101), so a main thread waiting for the start waited for itself:
+// measured on the first build of this rule, every screencast start on Linux
+// wedged, two e2e of two, while Windows, which has no such request, started.
+// Everything the module needs is handed to the control thread and nothing is
+// waited for.
 class nsScreencastService::Session final
     : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
  public:
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(Session)
 
   Session(nsIScreencastServiceClient* aClient, nsIWidget* aWidget,
-          webrtc::scoped_refptr<webrtc::DesktopCaptureImpl> aModule,
-          const nsACString& aWindowId, int aWidth, int aHeight,
-          int aViewportWidth, int aViewportHeight, gfx::IntMargin aMargin,
-          uint32_t aQuality, uint32_t aFps)
+          nsIThread* aControl, const nsACString& aWindowId, int aWidth,
+          int aHeight, int aViewportWidth, int aViewportHeight,
+          gfx::IntMargin aMargin, uint32_t aQuality, uint32_t aFps)
       : mClient(aClient),
         mWidget(aWidget),
-        mModule(std::move(aModule)),
+        mControl(aControl),
         mWindowId(aWindowId),
         mWidth(aWidth),
         mHeight(aHeight),
@@ -161,37 +185,52 @@ class nsScreencastService::Session final
 
   nsIWidget* Widget() const { return mWidget; }
 
-  // Main thread. The module was created on this thread, and DesktopCaptureImpl
-  // asserts that StartCapture and StopCapture come from the thread that
-  // created it. A failure of the FIRST start is the caller's answer; a module
-  // that ends later is replaced without anybody being asked.
+  // Main thread. The module is created and started on the control thread, and
+  // DesktopCaptureImpl asserts that StartCapture and StopCapture come from the
+  // thread that created it. Nothing here waits for it (see the comment on the
+  // class): a start that fails is tried again after kRetryDelayMs, as a module
+  // that ends is, and the caller hears of a window that cannot be captured by
+  // the frames not coming, as of one that stopped being capturable. Only a
+  // control thread that takes no task is the caller's answer.
   bool Start() {
-    if (!StartModule()) {
+    nsresult rv = mControl->Dispatch(NS_NewRunnableFunction(
+        "nsScreencastService::Session::Start", [self = RefPtr{this}]() {
+          if (!self->mStopped.load() && !self->CreateAndStartModule()) {
+            self->RetryLater();
+          }
+        }));
+    if (NS_FAILED(rv)) {
+      // Nothing started, so nobody is told: the caller hears the failure.
+      // The client and the widget are dropped here for the reason Stop gives.
+      mStopped.store(true);
+      mClient = nullptr;
+      mWidget = nullptr;
+      ShutdownControl();
       return false;
     }
     ArmHeartbeat();
     return true;
   }
 
-  // Main thread.
+  // Main thread. Nothing here waits: the module is released on the control
+  // thread, which then ends. A frame already queued to the main thread finds
+  // mStopped set and drops itself, and so do the retry and the heartbeat.
   //
-  // The order is load-bearing. DeRegisterCaptureDataCallback takes the same
-  // lock NotifyOnFrame holds while it is inside OnFrame, so when it returns
-  // no OnFrame is running and none will start; StopCapture then joins the
-  // capture thread. A frame already queued to the main thread finds mStopped
-  // set and drops itself, and so do the retry and the heartbeat.
+  // The widget and the client are main-thread objects and are dropped here,
+  // because the last reference to this session may go on another thread.
   void Stop() {
     if (mStopped.exchange(true)) {
       return;
     }
-    ReleaseModule();
     if (mClient) {
       mClient->ScreencastStopped();
       mClient = nullptr;
     }
+    mWidget = nullptr;
+    ShutdownControl();
   }
 
-  // Main thread. The module's own word that it will not ask for frames any
+  // Control thread. The module's own word that it will not ask for frames any
   // more - a permanent error from the capturer. The module is released and
   // another one is tried after kRetryDelayMs, for as long as this session
   // lives: a window that cannot be captured now is usually a window that can
@@ -354,8 +393,36 @@ class nsScreencastService::Session final
  private:
   ~Session() override = default;
 
-  // Main thread. Register, start, and listen for the module ending on its
-  // own. Shared by the first start and by every retry.
+  // Main thread. The control thread releases what it holds and ends, and its
+  // last join is an event on this thread rather than a wait. The way out of a
+  // Stop and of a Start that failed.
+  void ShutdownControl() {
+    if (!mControl) {
+      return;
+    }
+    // Neither fails while the thread is alive, and a thread already gone at
+    // XPCOM shutdown has taken its module down with it.
+    (void)mControl->Dispatch(NS_NewRunnableFunction(
+        "nsScreencastService::Session::Release",
+        [self = RefPtr{this}]() { self->ReleaseModule(); }));
+    (void)mControl->AsyncShutdown();
+    mControl = nullptr;
+  }
+
+  // Control thread. A module for the window, started. Shared by the first
+  // start and by every retry.
+  bool CreateAndStartModule() {
+    mModule = webrtc::DesktopCaptureImpl::Create(
+        NextModuleId(), mWindowId.get(), camera::CaptureDeviceType::Window);
+    if (!mModule || !StartModule()) {
+      mModule = nullptr;
+      return false;
+    }
+    return true;
+  }
+
+  // Control thread. Register, start, and listen for the module ending on its
+  // own, on this same thread.
   bool StartModule() {
     webrtc::VideoCaptureCapability capability;
     // The desktop capturer takes its size from the window; the frame rate is
@@ -371,12 +438,18 @@ class nsScreencastService::Session final
       return false;
     }
     mEnded = mModule->CaptureEndedEvent()->Connect(
-        GetMainThreadSerialEventTarget(), this, &Session::OnCaptureEnded);
+        GetCurrentSerialEventTarget(), this, &Session::OnCaptureEnded);
     return true;
   }
 
-  // Main thread. The listener goes first: it holds a raw pointer to this
+  // Control thread. The listener goes first: it holds a raw pointer to this
   // object and a module being stopped can still fire the event.
+  //
+  // The order is load-bearing. DeRegisterCaptureDataCallback takes the same
+  // lock NotifyOnFrame holds while it is inside OnFrame, so when it returns
+  // no OnFrame is running and none will start; StopCapture then waits for the
+  // capture thread, which may be inside PrintWindow waiting for the main
+  // thread - free to answer, because nothing there waits for this one.
   void ReleaseModule() {
     mEnded.DisconnectIfExists();
     if (mModule) {
@@ -386,6 +459,7 @@ class nsScreencastService::Session final
     }
   }
 
+  // Control thread.
   void RetryLater() {
     NS_DelayedDispatchToCurrentThread(
         NS_NewRunnableFunction("nsScreencastService::Session::Retry",
@@ -393,16 +467,13 @@ class nsScreencastService::Session final
         kRetryDelayMs);
   }
 
-  // Main thread. A new module for the same window, and another attempt later
-  // if this one cannot even start.
+  // Control thread. A new module for the same window, and another attempt
+  // later if this one cannot even start.
   void Retry() {
     if (mStopped.load() || mModule) {
       return;
     }
-    mModule = webrtc::DesktopCaptureImpl::Create(
-        NextModuleId(), mWindowId.get(), camera::CaptureDeviceType::Window);
-    if (!mModule || !StartModule()) {
-      mModule = nullptr;
+    if (!CreateAndStartModule()) {
       RetryLater();
     }
   }
@@ -438,9 +509,13 @@ class nsScreencastService::Session final
 
   // Main thread only: the client is a JavaScript object.
   nsCOMPtr<nsIScreencastServiceClient> mClient;
-  nsCOMPtr<nsIWidget> mWidget;
-  webrtc::scoped_refptr<webrtc::DesktopCaptureImpl> mModule;
   // Main thread only.
+  nsCOMPtr<nsIWidget> mWidget;
+  // Main thread only; null once the session stopped.
+  nsCOMPtr<nsIThread> mControl;
+  // Control thread only.
+  webrtc::scoped_refptr<webrtc::DesktopCaptureImpl> mModule;
+  // Control thread only.
   MediaEventListener mEnded;
   const nsCString mWindowId;
   nsCString mLastFrame;
@@ -565,22 +640,18 @@ NS_IMETHODIMP nsScreencastService::StartScreencast(
   nsCString windowId;
   windowId.AppendPrintf("%" PRIuPTR, rawWindowId);
 
-  // Explicit, because scoped_refptr's constructor from a raw pointer is:
-  // taking a reference is a decision, not something a conversion should do
-  // quietly. `video_capture_factory.cc` wraps the same call the same way.
-  webrtc::scoped_refptr<webrtc::DesktopCaptureImpl> module(
-      webrtc::DesktopCaptureImpl::Create(NextModuleId(), windowId.get(),
-                                         camera::CaptureDeviceType::Window));
-  if (!module) {
-    return NS_ERROR_FAILURE;
-  }
-
   nsString uid;
   nsresult rv = GenerateUid(uid);
   NS_ENSURE_SUCCESS(rv, rv);
 
+  // The thread the capture module is created, started and stopped on: see
+  // the comment on Session for why it is never this one.
+  nsCOMPtr<nsIThread> control;
+  rv = NS_NewNamedThread("ScreencastCtl", getter_AddRefs(control));
+  NS_ENSURE_SUCCESS(rv, rv);
+
   RefPtr<Session> session = new Session(
-      aClient, widget, std::move(module), windowId, int(aWidth), int(aHeight),
+      aClient, widget, control, windowId, int(aWidth), int(aHeight),
       int(aViewportWidth), int(aViewportHeight), margin, aQuality, aFps);
   if (!session->Start()) {
     return NS_ERROR_FAILURE;

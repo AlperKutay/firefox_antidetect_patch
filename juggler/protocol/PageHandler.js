@@ -555,6 +555,17 @@ export class PageHandler {
     });
   }
 
+  async ['Page.elementAtom'](options) {
+    return await this._contentPage.send('elementAtom', options);
+  }
+
+  // The title as Marionette reads it, in the parent: the top document's
+  // window global, so a page busy in a script does not hold the answer.
+  ['Page.title']() {
+    const browsingContext = this._pageTarget.linkedBrowser().browsingContext;
+    return {title: browsingContext?.currentWindowGlobal?.documentTitle ?? ''};
+  }
+
   async ['Page.describeNode'](options) {
     return await this._contentPage.send('describeNode', options);
   }
