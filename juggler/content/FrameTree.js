@@ -509,7 +509,16 @@ export class FrameTree {
 
   _onBrowsingContextDetached(browsingContext) {
     const frame = this.frameForBrowsingContext(browsingContext);
-    if (frame)
+    // Only when the context that went IS this frame's. A frame id names the
+    // frame, not one context: the main frame's is the browser's
+    // (`mainframe-<browserId>`), so every top-level context the tab has had
+    // resolves to it. With the back-forward cache in the parent each
+    // navigation gives the tab a new top-level context and a new tree, and
+    // when the cache let an old one go, every tree - the current one too -
+    // took it for its own main frame and detached all its children: the
+    // iframes of the page being loaded, alive in the browser, were reported
+    // detached [B292].
+    if (frame && frame._browsingContext.id === browsingContext.id)
       this._detachFrame(frame);
   }
 
