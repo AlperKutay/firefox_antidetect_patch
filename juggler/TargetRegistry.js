@@ -749,8 +749,7 @@ export class PageTarget {
 
       const stackRect = this._linkedBrowser.closest('.browserStack').getBoundingClientRect();
       const toolbarTop = stackRect.y;
-      const [dx, dy] = this._growthWithinTheDisplay(width - this._window.innerWidth, height + toolbarTop - this._window.innerHeight);
-      this._window.resizeBy(dx, dy);
+      this._window.resizeBy(width - this._window.innerWidth, height + toolbarTop - this._window.innerHeight);
 
       await this._awaitContentSize(width, height);
     } else {
@@ -765,50 +764,6 @@ export class PageTarget {
       const actualSize = this._linkedBrowser.getBoundingClientRect();
       await this._awaitContentSize(actualSize.width, actualSize.height);
     }
-  }
-
-  /**
-   * The part of a resizeBy(dx, dy), in this chrome window's CSS pixels, that
-   * keeps the real window inside the work area of the display it is on.
-   *
-   * The window does not have to contain the viewport: the page lays out on
-   * the <browser> element, sized to the viewport inside an overflow:auto
-   * stack, and the geometry it reads (screen, outerWidth, screenX) is
-   * declared by the engine, not taken from the real window. Grown to contain
-   * a declared 2560x1440 screen, the window left a 1920x1080 display on Linux
-   * and a 2048x1208 work area on Windows, where nothing caps a window resized
-   * by a program (B287).
-   *
-   * Real measures only, in device pixels: in a stealth build this window's
-   * outerWidth, screenX and screen answer the declared values here in chrome
-   * too, so the frame comes from the widget and the work area from the
-   * screen manager. devicePixelRatio is real for chrome callers.
-   */
-  _growthWithinTheDisplay(dx, dy) {
-    const baseWindow = this._window.docShell.treeOwner
-        .QueryInterface(Ci.nsIInterfaceRequestor)
-        .getInterface(Ci.nsIAppWindow)
-        .QueryInterface(Ci.nsIBaseWindow);
-    const x = {}, y = {}, w = {}, h = {};
-    baseWindow.getPositionAndSize(x, y, w, h);
-    const desktopScale = baseWindow.devicePixelsPerDesktopPixel;
-    const screen = Cc['@mozilla.org/gfx/screenmanager;1']
-        .getService(Ci.nsIScreenManager)
-        .screenForRect(
-            Math.round(x.value / desktopScale), Math.round(y.value / desktopScale),
-            Math.round(w.value / desktopScale), Math.round(h.value / desktopScale));
-    const left = {}, top = {}, availWidth = {}, availHeight = {};
-    screen.GetAvailRect(left, top, availWidth, availHeight);
-    // The room from where the window starts to the far edges of the work area.
-    // A frame that starts before the work area (a maximized window's resize
-    // border) counts from the work area's edge.
-    const roomWidth = left.value + availWidth.value - Math.max(x.value, left.value);
-    const roomHeight = top.value + availHeight.value - Math.max(y.value, top.value);
-    const scale = this._window.devicePixelRatio;
-    return [
-      Math.min(dx, Math.floor((roomWidth - w.value) / scale)),
-      Math.min(dy, Math.floor((roomHeight - h.value) / scale)),
-    ];
   }
 
   /**
