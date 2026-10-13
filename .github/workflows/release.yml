@@ -133,6 +133,18 @@ jobs:
         shell: bash
         run: python3 scripts/check_release_naming.py
 
+      # The channel between Juggler's two halves, tested without a browser. A
+      # request answered from another channel end's kept answers is never
+      # dispatched and nothing says so: a page's "main world created" was lost
+      # that way and every read in the page's world after it waited out its
+      # whole timeout (B286). Seconds here, before hours of build.
+      - name: Juggler's channel keeps the requests of every end apart
+        if: matrix.leg == 'linux-x86_64'
+        shell: bash
+        # The files, expanded by the shell: from Node 21 the arguments of
+        # --test are file patterns, and a directory is loaded as a module.
+        run: node --test juggler/tests/*.test.mjs
+
       # Record which firefox_antidetect_patch commit this build came from. The publish
       # job turns the range previous-release..this commit into the release notes
       # (scripts/gen_release_notes.py), and re-publishes it as a source-commit.txt

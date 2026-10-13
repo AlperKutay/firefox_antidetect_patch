@@ -7,6 +7,9 @@
 // Avoid Components.*, ChromeUtils and global const variables.
 
 var SIMPLE_CHANNEL_MESSAGE_NAME = 'juggler:simplechannel';
+// How many channel ends this load of the file has made: one part of each end's
+// identity (see `_uid`).
+var SIMPLE_CHANNEL_INSTANCES = 0;
 
 var SimpleChannel = class SimpleChannel {
   constructor(name, uid) {
@@ -24,11 +27,18 @@ var SimpleChannel = class SimpleChannel {
     this._paused = false;
     this._disposed = false;
 
+    // The answers given to the other end, kept until it acknowledges them, keyed
+    // by the requesting end's identity AND its request number (see `_answerKey`).
     this._bufferedResponses = new Map();
-    // This is a "unique" identifier of this end of the channel. Two SimpleChannel instances
-    // on the same end of the channel (e.g. two content processes) must not have the same id.
-    // This way, the other end can distinguish between the old peer with a new transport and a new peer.
-    this._uid = uid;
+    // The identity of THIS end, unique per instance, and it has to be the channel
+    // that makes it so: every end numbers its requests from 1, so an end that
+    // shared its identity with an earlier one had its requests answered from the
+    // earlier one's answers and never dispatched. `uid` is only the caller's
+    // label; content/main.js gave 'process-<pid>' to every page channel of a
+    // process, and a page's "main world created" announcement was lost that way
+    // (B286). The counter separates the ends of one process, the random part
+    // separates processes that reuse a pid.
+    this._uid = `${uid}#${++SIMPLE_CHANNEL_INSTANCES}.${Math.random().toString(36).slice(2, 10)}`;
     this._connectedToUID = undefined;
   }
 
@@ -151,7 +161,7 @@ var SimpleChannel = class SimpleChannel {
     if (this._disposed)
       throw new Error(`ERROR: channel ${this._name} is already disposed! Cannot send "${methodName}" to "${namespace}"`);
     const id = ++this._messageId;
-    const message = {requestId: id, methodName, params, namespace};
+    const message = {requestId: id, uid: this._uid, methodName, params, namespace};
     const promise = new Promise((resolve, reject) => {
       this._pendingMessages.set(id, {connectorId, resolve, reject, methodName, namespace, message});
     });
@@ -163,29 +173,27 @@ var SimpleChannel = class SimpleChannel {
   _onMessage(data) {
     if (data?.ack === 'READY') {
       // The "READY" and "READY_ACK" messages are a part of initialization sequence.
-      // This sequence happens when:
-      // 1. A new SimpleChannel instance is getting initialized on the other end.
-      //    In this case, it will have a different UID and we must clear
-      //    `this._bufferedResponses` since they are no longer relevant.
-      // 2. A new transport is assigned to communicate between 2 SimpleChannel instances.
-      //    In this case, we MUST NOT clear `this._bufferedResponses` since they are used
-      //    to address the double-dispatch issue.
-      if (this._connectedToUID !== data.uid)
-        this._bufferedResponses.clear();
+      // This sequence happens when a new SimpleChannel instance is getting
+      // initialized on the other end, or when a new transport is assigned to
+      // communicate between 2 SimpleChannel instances.
+      //
+      // The answers kept for the double-dispatch issue are NOT cleared here: they
+      // are keyed by the requesting end, so a new end cannot meet an old end's
+      // answer, and an old end that comes back (a document restored from the
+      // back-forward cache) still finds its own. Clearing them on a change of
+      // peer was what left an old end to be dispatched twice.
       this._connectedToUID = data.uid;
       this.transport.sendMessage({ ack: 'READY_ACK', uid: this._uid });
       this._markAsReady();
       return;
     }
     if (data?.ack === 'READY_ACK') {
-      if (this._connectedToUID !== data.uid)
-        this._bufferedResponses.clear();
       this._connectedToUID = data.uid;
       this._markAsReady();
       return;
     }
     if (data?.ack === 'RESPONSE_ACK') {
-      this._bufferedResponses.delete(data.responseId);
+      this._bufferedResponses.delete(this._answerKey(data.uid, data.responseId));
       return;
     }
     if (this._paused)
@@ -194,9 +202,15 @@ var SimpleChannel = class SimpleChannel {
       this._onMessageInternal(data);
   }
 
+  // An answer belongs to one request of one end: request numbers restart with
+  // every end.
+  _answerKey(uid, requestId) {
+    return `${uid}/${requestId}`;
+  }
+
   async _onMessageInternal(data) {
     if (data.responseId) {
-      this.transport.sendMessage({ ack: 'RESPONSE_ACK', responseId: data.responseId });
+      this.transport.sendMessage({ ack: 'RESPONSE_ACK', responseId: data.responseId, uid: this._uid });
       const message = this._pendingMessages.get(data.responseId);
       if (!message) {
         // During cross-process navigation, we might receive a response for
@@ -215,8 +229,9 @@ var SimpleChannel = class SimpleChannel {
       //
       // If this request was already processed, we can fulfill it with the cached response
       // and fast-return.
-      if (this._bufferedResponses.has(data.requestId)) {
-        this.transport.sendMessage(this._bufferedResponses.get(data.requestId));
+      const answerKey = this._answerKey(data.uid, data.requestId);
+      if (this._bufferedResponses.has(answerKey)) {
+        this.transport.sendMessage(this._bufferedResponses.get(answerKey));
         return;
       }
 
@@ -243,7 +258,7 @@ var SimpleChannel = class SimpleChannel {
       // We only need to buffer & send response if we are connected to the same
       // end.
       if (connectedToUID === this._connectedToUID) {
-        this._bufferedResponses.set(data.requestId, response);
+        this._bufferedResponses.set(answerKey, response);
         this.transport.sendMessage(response);
       }
     } else {
