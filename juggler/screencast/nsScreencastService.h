@@ -26,8 +26,8 @@ class nsScreencastService final : public nsIScreencastService {
   ~nsScreencastService();
 
   class Session;
-  // Main thread only. The capture module insists that Start and Stop come
-  // from the thread that created it, and that thread is this one.
+  // Main thread only. Each session's capture module lives on that session's
+  // own control thread, never this one: the comment on Session says why.
   std::map<nsString, RefPtr<Session>> mIdToSession;
 };
 
