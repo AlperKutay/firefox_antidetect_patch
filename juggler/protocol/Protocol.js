@@ -828,6 +828,22 @@ const Page = {
         cacheDisabled: t.Boolean,
       },
     },
+    'elementAtom': {
+      params: {
+        frameId: t.String,
+        objectId: t.String,
+        atom: t.Enum(['getVisibleText', 'isElementDisplayed']),
+      },
+      returns: {
+        result: t.Any,
+      },
+    },
+    'title': {
+      params: {},
+      returns: {
+        title: t.String,
+      },
+    },
     'describeNode': {
       params: {
         frameId: t.String,
