@@ -888,7 +888,6 @@ export class PageHandler {
           false /* isWidgetEventSynthesized */,
           buttons,
           win.windowUtils.DEFAULT_MOUSE_POINTER_ID /* pointerIdentifier */,
-          false /* disablePointerEvent */,
           latency || 0 /* [B299] born this many ms before the dispatch */
         );
       }
@@ -922,7 +921,6 @@ export class PageHandler {
           false /* isWidgetEventSynthesized */,
           buttons,
           win.windowUtils.DEFAULT_MOUSE_POINTER_ID /* pointerIdentifier */,
-          false /* disablePointerEvent */,
           latency || 0 /* [B299] born this many ms before the dispatch */
         );
         return;
@@ -971,7 +969,7 @@ export class PageHandler {
               lastEventId = win.windowUtils.jugglerSendMouseEvent('mousemove',
                   point.x, point.y, button, clickCount, modifiers,
                   false, (buttons ? 0.5 : 0.0) /* pressure */, 1 /* inputSource: real mouse */, true, false, buttons,
-                  win.windowUtils.DEFAULT_MOUSE_POINTER_ID, false, latency || 0);
+                  win.windowUtils.DEFAULT_MOUSE_POINTER_ID, latency || 0);
             } catch (e) { /* ignore per-step errors */ }
             // Jittered inter-sample delay: a real human's pointer dt is non-uniform;
             // a fixed stepMs was a behavioral tell. Gaussian around stepMs.
