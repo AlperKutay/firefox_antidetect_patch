@@ -20327,6 +20327,18 @@
   value: -1
   mirror: always
 
+# Stealthfox [B300]: when above 0, the device enumeration is DECLARED, not
+# asked of the host. The speakers are not enumerated (with fake cameras and
+# microphones they were the only thing asked of the machine, through its audio
+# stack: retail Windows takes ~250 ms on its first enumeration, 251-255 ms
+# with fake devices too, and a host without audio a few ms), and the first
+# enumeration answers after this many milliseconds, which the client draws
+# from the session seed. 0 is stock Firefox.
+- name: zoom.stealth.media.enumeration_ms
+  type: uint32_t
+  value: 0
+  mirror: always
+
 # Diagnostic gate (2026-06-22): when false, disable the per-session OfflineAudioContext
 # noise even if hw_seed > 0. Lets us isolate whether the audio noise (vs the font jitter)
 # is what drives FP Pro tampering_ml on Windows. Default true = noise on (legacy behaviour).

@@ -935,6 +935,10 @@ const Page = {
         code: t.String,
         repeat: t.Boolean,
         text: t.Optional(t.String),
+        // Stealthfox [B299]: milliseconds between the event's birth and its
+        // dispatch, as an input event is born in the system before a page's
+        // handler runs. Absent is born at the dispatch.
+        latency: t.Optional(t.Number),
       }
     },
     'dispatchTapEvent': {
@@ -956,6 +960,8 @@ const Page = {
         // The element the event is meant for: the answer then says whether the
         // event LANDED on it, judged when the page handled it.
         landsOn: t.Optional(pageTypes.LandingTarget),
+        // Stealthfox [B299]: as for dispatchKeyEvent.
+        latency: t.Optional(t.Number),
       },
       // The command answers once the page has HANDLED the event (or a dialog
       // it opened is showing), so a caller's next command runs after it.

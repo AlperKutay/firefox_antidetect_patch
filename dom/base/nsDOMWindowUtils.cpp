@@ -726,14 +726,14 @@ nsDOMWindowUtils::JugglerSendMouseEvent(
     int32_t aClickCount, int32_t aModifiers, bool aIgnoreRootScrollFrame,
     float aPressure, unsigned short aInputSourceArg,
     bool aIsDOMEventSynthesized, bool aIsWidgetEventSynthesized,
-    int32_t aButtons, uint32_t aIdentifier, bool aDisablePointerEvent,
+    int32_t aButtons, uint32_t aIdentifier, double aLatency,
     uint32_t* aJugglerEventId) {
   *aJugglerEventId = ++sJugglerEventId;
 
-  // aDisablePointerEvent is accepted for FF146 API compat but ignored here;
-  // FF150's nsContentUtils::SynthesizeMouseEvent gates pointer dispatch on the
-  // event type via IsPointerEventMessage(), not on an options flag.
-  (void)aDisablePointerEvent;
+  // Stealthfox [B299]: aLatency took the place of aDisablePointerEvent, which
+  // this method accepted for FF146's signature and ignored (FF150's
+  // SynthesizeMouseEvent gates pointer dispatch on the event type). XPConnect
+  // takes 15 arguments at most, and a 16th failed the build.
 
   RefPtr<PresShell> presShell = GetPresShell();
   if (!presShell) {
@@ -758,6 +758,9 @@ nsDOMWindowUtils::JugglerSendMouseEvent(
   mouseEventData.mInputSource = aInputSourceArg;
   mouseEventData.mModifiers = aModifiers;
   mouseEventData.mJugglerEventId = *aJugglerEventId;
+  // Stealthfox [B299]: born that many milliseconds before its dispatch; see
+  // nsContentUtils::SynthesizeMouseEvent.
+  mouseEventData.mLatency = aLatency;
 
   dom::SynthesizeMouseEventOptions options;
   options.mIgnoreRootScrollFrame = aIgnoreRootScrollFrame;

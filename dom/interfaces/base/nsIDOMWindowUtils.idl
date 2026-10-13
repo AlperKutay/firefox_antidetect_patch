@@ -474,7 +474,7 @@ interface nsIDOMWindowUtils : nsISupports {
                          in boolean aIsWidgetEventSynthesized,
                          in long aButtons,
                          in unsigned long aIdentifier,
-                         in boolean aDisablePointerEvent);
+                         in double aLatency);
 
   /**
    * Stealthfox: dispatch a synthetic DRAG event the way the platform's own

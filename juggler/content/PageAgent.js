@@ -691,7 +691,7 @@ export class PageAgent {
     return {x: x1, y: y1, width: x2 - x1, height: y2 - y1};
   }
 
-  async _dispatchKeyEvent({type, keyCode, code, key, repeat, location, text}) {
+  async _dispatchKeyEvent({type, keyCode, code, key, repeat, location, text, latency}) {
     const frame = this._frameTree.mainFrame();
     const tip = frame.textInputProcessor();
     let keyEvent = new (frame.domWindow().KeyboardEvent)("", {
@@ -701,6 +701,16 @@ export class PageAgent {
       repeat,
       keyCode
     });
+    // Stealthfox [B299]: the event is born above, and handed over `latency`
+    // ms later, as an input event is born in the system before a page's
+    // handler runs. TextInputProcessor keeps the time the event was born
+    // with (KeydownInternal copies it, TextEventDispatcher assigns it), so
+    // the page reads a `timeStamp` that many ms below its `performance.now()`;
+    // born and handed over in one go they were equal, and a tracker that keeps
+    // only events from the past dropped them. The chrome timer, not the
+    // page's.
+    if (latency > 0)
+      await new Promise(f => setTimeout(f, latency));
     if (type === 'keydown') {
       if (text && text !== key) {
         tip.commitCompositionWith(text, keyEvent);
