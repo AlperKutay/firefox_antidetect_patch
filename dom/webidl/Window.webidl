@@ -396,6 +396,10 @@ dictionary SynthesizeMouseEventData : SynthesizeEventData {
   long modifiers = 0;
   // Juggler event identifier for tracking events across processes.
   unsigned long jugglerEventId = 0;
+  // Stealthfox [B299]: how many milliseconds before its dispatch the event was
+  // born, as an input event is born in the system before a page's handler
+  // runs. 0 is born now.
+  double latency = 0;
 };
 
 // Mozilla-specific stuff

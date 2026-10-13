@@ -609,7 +609,7 @@ export class PageHandler {
   // It holds for all direct input - keys, inserted text, touch - not only for
   // the measured case: the defect belongs to the class, and fixing one member
   // would leave the others to diverge on their own (rule 16).
-  async ['Page.dispatchKeyEvent']({type, keyCode, code, key, repeat, location, text}) {
+  async ['Page.dispatchKeyEvent']({type, keyCode, code, key, repeat, location, text, latency}) {
     // key events don't fire if we are dragging.
     if (this._isDragging) {
       if (type === 'keydown' && key === 'Escape') {
@@ -629,7 +629,7 @@ export class PageHandler {
       return;
     }
     return await this._pageTarget.activateAndRun(() =>
-      this._contentPage.send('dispatchKeyEvent', {type, keyCode, code, key, repeat, location, text}));
+      this._contentPage.send('dispatchKeyEvent', {type, keyCode, code, key, repeat, location, text, latency}));
   }
 
   /**
@@ -854,7 +854,7 @@ export class PageHandler {
     };
   }
 
-  async ['Page.dispatchMouseEvent']({type, x, y, button, clickCount, modifiers, buttons, landsOn}) {
+  async ['Page.dispatchMouseEvent']({type, x, y, button, clickCount, modifiers, buttons, landsOn, latency}) {
     const win = this._pageTarget._window;
     const page = await this._pagePixels();
     // The element this event is meant for, held by the content process BEFORE
@@ -888,7 +888,8 @@ export class PageHandler {
           false /* isWidgetEventSynthesized */,
           buttons,
           win.windowUtils.DEFAULT_MOUSE_POINTER_ID /* pointerIdentifier */,
-          false /* disablePointerEvent */
+          false /* disablePointerEvent */,
+          latency || 0 /* [B299] born this many ms before the dispatch */
         );
       }
     };
@@ -921,7 +922,8 @@ export class PageHandler {
           false /* isWidgetEventSynthesized */,
           buttons,
           win.windowUtils.DEFAULT_MOUSE_POINTER_ID /* pointerIdentifier */,
-          false /* disablePointerEvent */
+          false /* disablePointerEvent */,
+          latency || 0 /* [B299] born this many ms before the dispatch */
         );
         return;
       }
@@ -969,7 +971,7 @@ export class PageHandler {
               lastEventId = win.windowUtils.jugglerSendMouseEvent('mousemove',
                   point.x, point.y, button, clickCount, modifiers,
                   false, (buttons ? 0.5 : 0.0) /* pressure */, 1 /* inputSource: real mouse */, true, false, buttons,
-                  win.windowUtils.DEFAULT_MOUSE_POINTER_ID, false);
+                  win.windowUtils.DEFAULT_MOUSE_POINTER_ID, false, latency || 0);
             } catch (e) { /* ignore per-step errors */ }
             // Jittered inter-sample delay: a real human's pointer dt is non-uniform;
             // a fixed stepMs was a behavioral tell. Gaussian around stepMs.

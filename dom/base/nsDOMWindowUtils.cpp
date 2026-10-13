@@ -727,7 +727,7 @@ nsDOMWindowUtils::JugglerSendMouseEvent(
     float aPressure, unsigned short aInputSourceArg,
     bool aIsDOMEventSynthesized, bool aIsWidgetEventSynthesized,
     int32_t aButtons, uint32_t aIdentifier, bool aDisablePointerEvent,
-    uint32_t* aJugglerEventId) {
+    double aLatency, uint32_t* aJugglerEventId) {
   *aJugglerEventId = ++sJugglerEventId;
 
   // aDisablePointerEvent is accepted for FF146 API compat but ignored here;
@@ -758,6 +758,9 @@ nsDOMWindowUtils::JugglerSendMouseEvent(
   mouseEventData.mInputSource = aInputSourceArg;
   mouseEventData.mModifiers = aModifiers;
   mouseEventData.mJugglerEventId = *aJugglerEventId;
+  // Stealthfox [B299]: born that many milliseconds before its dispatch; see
+  // nsContentUtils::SynthesizeMouseEvent.
+  mouseEventData.mLatency = aLatency;
 
   dom::SynthesizeMouseEventOptions options;
   options.mIgnoreRootScrollFrame = aIgnoreRootScrollFrame;
