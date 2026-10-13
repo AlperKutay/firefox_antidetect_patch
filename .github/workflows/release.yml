@@ -141,7 +141,9 @@ jobs:
       - name: Juggler's channel keeps the requests of every end apart
         if: matrix.leg == 'linux-x86_64'
         shell: bash
-        run: node --test juggler/tests/
+        # The files, expanded by the shell: from Node 21 the arguments of
+        # --test are file patterns, and a directory is loaded as a module.
+        run: node --test juggler/tests/*.test.mjs
 
       # Record which firefox_antidetect_patch commit this build came from. The publish
       # job turns the range previous-release..this commit into the release notes
