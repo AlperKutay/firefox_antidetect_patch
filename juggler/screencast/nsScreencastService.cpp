@@ -28,7 +28,6 @@
 #include "mozilla/EndianUtils.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/StaticPtr.h"
-#include "mozilla/SyncRunnable.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/gfx/Rect.h"
 #include "nsIDocShell.h"
@@ -145,10 +144,14 @@ nsresult GenerateUid(nsString& aUid) {
 // first fifteen stops. Firefox's own window sharing drives the module from
 // CamerasParent's "VideoCapture" thread, never from the main thread.
 //
-// So the main thread never waits for anything that waits for the capture
-// thread. It waits for the control thread once, at Start, when that thread is
-// new and no capture thread exists yet; everything later is handed over and
-// not waited for.
+// ⛔ AND THE MAIN THREAD NEVER WAITS FOR THE CONTROL THREAD, NOT EVEN TO
+// START. StartCapture asks the main thread for its X11 options with a
+// SyncRunnable (CreateDesktopCaptureOptions, "help avoid an X11 deadlock",
+// bug 1456101), so a main thread waiting for the start waited for itself:
+// measured on the first build of this rule, every screencast start on Linux
+// wedged, two e2e of two, while Windows, which has no such request, started.
+// Everything the module needs is handed to the control thread and nothing is
+// waited for.
 class nsScreencastService::Session final
     : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
  public:
@@ -184,24 +187,19 @@ class nsScreencastService::Session final
 
   // Main thread. The module is created and started on the control thread, and
   // DesktopCaptureImpl asserts that StartCapture and StopCapture come from the
-  // thread that created it. A failure of the FIRST start is the caller's
-  // answer, so this one is waited for; a module that ends later is replaced
-  // without anybody being asked.
-  //
-  // Waiting here is safe because of what the control thread does meanwhile:
-  // StartCapture creates the capture thread and hands it its first task
-  // without waiting for it. A first capture that reaches PrintWindow before
-  // this returns waits for the main thread, which is waiting for a thread
-  // that is not waiting for anybody.
+  // thread that created it. Nothing here waits for it (see the comment on the
+  // class): a start that fails is tried again after kRetryDelayMs, as a module
+  // that ends is, and the caller hears of a window that cannot be captured by
+  // the frames not coming, as of one that stopped being capturable. Only a
+  // control thread that takes no task is the caller's answer.
   bool Start() {
-    bool started = false;
-    nsresult rv = SyncRunnable::DispatchToThread(
-        mControl, NS_NewRunnableFunction(
-                      "nsScreencastService::Session::Start",
-                      [&started, self = RefPtr{this}]() {
-                        started = self->CreateAndStartModule();
-                      }));
-    if (NS_FAILED(rv) || !started) {
+    nsresult rv = mControl->Dispatch(NS_NewRunnableFunction(
+        "nsScreencastService::Session::Start", [self = RefPtr{this}]() {
+          if (!self->mStopped.load() && !self->CreateAndStartModule()) {
+            self->RetryLater();
+          }
+        }));
+    if (NS_FAILED(rv)) {
       // Nothing started, so nobody is told: the caller hears the failure.
       // The client and the widget are dropped here for the reason Stop gives.
       mStopped.store(true);
